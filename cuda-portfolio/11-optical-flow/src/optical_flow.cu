@@ -9,6 +9,7 @@
 #include <cstring>
 #include <random>
 #include <stdexcept>
+#include <utility>
 
 #include "cu/check.hpp"
 #include "cu/timer.hpp"

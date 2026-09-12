@@ -4,6 +4,7 @@
 #include <cmath>
 #include <map>
 #include <random>
+#include <stdexcept>
 #include <vector>
 
 #include "spatial_index.h"

@@ -1,10 +1,12 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <numeric>
 #include <random>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 

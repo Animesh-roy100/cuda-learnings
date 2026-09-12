@@ -1,7 +1,8 @@
 // Graph engine benchmark: push vs pull, thread vs warp balancing.
 
-#include <cstdio>
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <vector>
 
 #include "cu/device.hpp"

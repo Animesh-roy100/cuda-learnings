@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <random>
+#include <utility>
 #include <vector>
 
 #include "cu/device.hpp"

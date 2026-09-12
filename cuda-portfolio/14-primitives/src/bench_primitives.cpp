@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include "cu/device.hpp"

@@ -10,11 +10,13 @@
 
 #include "image_pipeline.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace vision {

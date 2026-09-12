@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <numeric>
 #include <random>
+#include <stdexcept>
 #include <vector>
 
 #include "spmv.h"

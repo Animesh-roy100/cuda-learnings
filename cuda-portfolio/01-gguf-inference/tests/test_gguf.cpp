@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <stdexcept>
 #include <string>
 #include <vector>
 

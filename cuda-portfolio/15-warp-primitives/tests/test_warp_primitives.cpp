@@ -4,6 +4,7 @@
 #include <cmath>
 #include <numeric>
 #include <random>
+#include <stdexcept>
 #include <vector>
 
 #include "warp_primitives.h"

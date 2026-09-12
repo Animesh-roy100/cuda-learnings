@@ -1,7 +1,8 @@
 // Spatial index benchmark: build cost, k-NN vs brute force, DBSCAN throughput.
 
-#include <cstdio>
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <random>
 #include <vector>
 
