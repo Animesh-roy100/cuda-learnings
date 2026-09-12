@@ -98,7 +98,7 @@ for f in ["01-quant-llm/quant_gemv.cu", "02-hash-table/hash_table.cu",
 Colab's sandbox may restrict process spawning — if it fails, that is the
 environment, not the code.
 
-## Step 5 — the full portfolio (18 projects, 350 tests)
+## Step 5 — the full portfolio (19 projects, 370 tests)
 
 ```python
 %cd /content/cuda-learnings/cuda-portfolio
@@ -115,7 +115,7 @@ A full build takes **5–10 minutes** on Colab's CPU allocation.
 %cd ..
 ```
 
-Expect `100% tests passed out of 20`. Every test is written against an
+Expect `100% tests passed out of 21`. Every test is written against an
 independent reference (CPU models, NIST vectors, closed-form Black-Scholes,
 brute-force k-NN, Dijkstra), so passing on different hardware is meaningful
 rather than tautological.
@@ -138,9 +138,10 @@ Then run whichever benchmarks interest you:
 !./build/bin/bench_layout_advanced   # AoS-vs-SoA, bank conflicts, WMMA, cg
 !./build/bin/bench_tc_gemm           # tensor-core GEMM vs cuBLAS, fp16 + int8
 !./build/bin/bench_flash_attention   # materialized vs fused online-softmax attention
+!./build/bin/chat "What is a GPU?"  # the LLM engine -- needs the model, see below
 ```
 
-All eighteen, if you want the full sweep (about 8 minutes):
+All nineteen, if you want the full sweep (about 9 minutes):
 
 ```python
 import subprocess, glob, os
@@ -153,6 +154,23 @@ for exe in sorted(glob.glob("build/bin/bench_*")):
 
 `bench_ann` spends about a minute on host-side k-means before it measures
 anything. That is expected, not a hang.
+
+## Running the LLM engine
+
+`19-llm-engine` needs a 638 MB model file that is not in the repository. Fetch
+it into Colab's scratch space (not into Drive):
+
+```python
+!MODEL_DIR=/content/models ./scripts/fetch_model.sh
+import os; os.environ["CUDA_PORTFOLIO_MODEL"] = "/content/models/tinyllama-1.1b-chat-v1.0.Q4_0.gguf"
+!./build/bin/chat "Explain what a KV cache is in two sentences."
+!./build/bin/bench_engine
+```
+
+Without the file, `test_llm_engine` still runs and skips its model tests. With
+it, the suite includes a host FP32 forward pass that takes about 10 seconds a
+check. On a T4 the decode rate should rise well above the GTX 1650's 130
+tokens/s: the Q4 GEMV is memory-bound, and the T4 has 320 GB/s against 192.
 
 ## What does *not* work on Colab
 

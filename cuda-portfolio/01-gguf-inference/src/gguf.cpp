@@ -2,6 +2,7 @@
 
 #include "gguf.h"
 
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 #include <utility>
@@ -113,6 +114,13 @@ TypeTraits type_traits(GgmlType t) {
         case GgmlType::Q5_1: return {32, 24, "Q5_1"};
         case GgmlType::Q8_0: return {32, 34, "Q8_0"};
         case GgmlType::Q8_1: return {32, 36, "Q8_1"};
+        // K-quant super-blocks of 256, sizes from the ggml block structs.
+        case GgmlType::Q2_K: return {256, 84, "Q2_K"};
+        case GgmlType::Q3_K: return {256, 110, "Q3_K"};
+        case GgmlType::Q4_K: return {256, 144, "Q4_K"};
+        case GgmlType::Q5_K: return {256, 176, "Q5_K"};
+        case GgmlType::Q6_K: return {256, 210, "Q6_K"};
+        case GgmlType::Q8_K: return {256, 292, "Q8_K"};
         default: return {1, 0, "unknown"};
     }
 }
@@ -139,6 +147,9 @@ struct GgufFile::Impl {
     std::uint32_t version = 0;
     std::vector<GgufTensor> tensors;
     std::map<std::string, MetaValue> meta;
+    std::map<std::string, std::vector<std::string>> string_arrays;
+    std::map<std::string, std::vector<double>> float_arrays;
+    std::map<std::string, std::vector<std::int64_t>> int_arrays;
     std::size_t data_offset = 0;
 
 #ifdef _WIN32
@@ -185,7 +196,32 @@ void GgufFile::Impl::parse() {
     for (std::uint64_t i = 0; i < n_meta; ++i) {
         std::string key = c.str();
         auto t = static_cast<MetaType>(c.pod<std::uint32_t>());
-        meta[key] = read_value(c, t);
+        if (t != MetaType::ARRAY) {
+            meta[key] = read_value(c, t);
+            continue;
+        }
+        // Arrays are read here rather than in read_value, which has no key to
+        // file them under. Every element is still bounds-checked by Cursor.
+        auto elem = static_cast<MetaType>(c.pod<std::uint32_t>());
+        std::uint64_t n = c.pod<std::uint64_t>();
+        if (n > (1ull << 32)) throw std::runtime_error("GGUF: implausible array length");
+        if (elem == MetaType::STRING) {
+            auto& v = string_arrays[key];
+            v.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(n, 1u << 20)));
+            for (std::uint64_t j = 0; j < n; ++j) v.push_back(c.str());
+        } else if (elem == MetaType::FLOAT32 || elem == MetaType::FLOAT64) {
+            auto& v = float_arrays[key];
+            for (std::uint64_t j = 0; j < n; ++j)
+                v.push_back(std::get<double>(read_value(c, elem)));
+        } else if (elem == MetaType::ARRAY) {
+            for (std::uint64_t j = 0; j < n; ++j) skip_value(c, elem);
+        } else if (elem == MetaType::BOOL) {
+            for (std::uint64_t j = 0; j < n; ++j) skip_value(c, elem);
+        } else {
+            auto& v = int_arrays[key];
+            for (std::uint64_t j = 0; j < n; ++j)
+                v.push_back(std::get<std::int64_t>(read_value(c, elem)));
+        }
     }
 
     tensors.reserve(static_cast<std::size_t>(n_tensors));
@@ -300,6 +336,19 @@ std::optional<std::string> GgufFile::meta_string(const std::string& key) const {
     if (it == impl_->meta.end()) return std::nullopt;
     if (auto* v = std::get_if<std::string>(&it->second)) return *v;
     return std::nullopt;
+}
+
+const std::vector<std::string>* GgufFile::meta_string_array(const std::string& key) const {
+    auto it = impl_->string_arrays.find(key);
+    return it == impl_->string_arrays.end() ? nullptr : &it->second;
+}
+const std::vector<double>* GgufFile::meta_float_array(const std::string& key) const {
+    auto it = impl_->float_arrays.find(key);
+    return it == impl_->float_arrays.end() ? nullptr : &it->second;
+}
+const std::vector<std::int64_t>* GgufFile::meta_int_array(const std::string& key) const {
+    auto it = impl_->int_arrays.find(key);
+    return it == impl_->int_arrays.end() ? nullptr : &it->second;
 }
 
 const void* GgufFile::tensor_data(const GgufTensor& t) const {

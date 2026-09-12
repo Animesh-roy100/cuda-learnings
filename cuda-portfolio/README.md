@@ -1,6 +1,6 @@
 # CUDA systems portfolio — GTX 1650 (Turing, `sm_75`)
 
-Eighteen production-structured CUDA projects. Every one builds, runs, and
+Nineteen production-structured CUDA projects. Every one builds, runs, and
 self-verifies against an independent reference. **Every number below was
 measured on this machine**, not estimated.
 
@@ -712,6 +712,106 @@ Two more measured details:
   because it still stages every tile, masked keys included.
 - **The smallest tile won the sweep** (tile 8: 1.16x over reading keys from
   global; tile 32: 0.48x), for the same reason: each larger tile costs a block.
+
+## 19. An LLM inference engine, GGUF to text (`19-llm-engine`)
+
+Projects 01, 14 and 18 assembled into a program that runs TinyLlama-1.1B-Chat
+(Q4_0 GGUF) end to end: tokenizer, 22 transformer layers with grouped-query
+attention, RoPE, SwiGLU, a device KV cache, sampling, and CUDA graphs over the
+decode loop.
+
+```
+> Explain in three sentences why GPUs are good at matrix multiplication.
+
+GPUs (Graphics Processing Units) are good at matrix multiplication because they
+are designed to perform complex calculations quickly and efficiently. ...
+```
+
+| configuration | perplexity | prefill tok/s | decode tok/s |
+|---|---|---|---|
+| float activations (W4A16) | 5.594 | 11.3 | 11.4 |
+| int8 activations (W4A8, `__dp4a`) | 5.551 | 128.9 | 121.3 |
+| int8 + CUDA graphs | 5.551 | **137.4** | **130.1** |
+
+Perplexity is on the opening of *Alice's Adventures in Wonderland*. Model
+weights are not in the repository: `scripts/fetch_model.ps1` / `.sh` download
+the 638 MB file and verify its SHA-256, and every model-dependent test skips
+cleanly without it.
+
+**Validated against an independent host forward pass**, FP32 from dequantized
+weights, sharing no code with the device path beyond the parser and block
+dequantizers. The float path matches it to **2.9e-6** relative error in the
+logits; int8 agrees on the answer; CUDA graphs reproduce the stream path's
+logits bit for bit. The tokenizer reproduces known Llama ids
+(`The capital of France is` -> `1 450 7483 310 3444 338`) and round-trips
+Unicode through byte fallback.
+
+### The bug that validation could not catch
+
+The first outputs were fluent nonsense, and the device engine matched the host
+reference to 3e-6 - both were wrong in the same way, so the bug was in what they
+shared. Two things were in doubt: the Q6_K output projection's bit layout, which
+had been written from memory, and everything else.
+
+A logit lens and a bit-correlation test were both inconclusive. The decisive
+experiment used the fact that the output projection is the *last* operation:
+compute the final hidden states once, then score every candidate Q6_K
+arrangement by the perplexity of the predictions it produces:
+
+| high 2 bits | best perplexity | worst perplexity |
+|---|---|---|
+| **quarters per 128 weights** | **4.99** | 5.93 |
+| any other arrangement | 377 | 352,000 |
+
+That one run proved the Q6_K layout *and* the 22-layer body at once: nothing
+short of a correct transformer reaches perplexity 5. The low-nibble layout that
+scored best, split per 128, matches ggml's AVX2 kernel once its shape is known.
+The arrangement is now documented in `quant.h` with how it was determined.
+
+### Two tokenizer facts the file forced
+
+- **Every vocabulary score is 0.** All 32,000. A SentencePiece encoder that picks
+  merges by score picks arbitrarily. The file ships 61,249 merges instead, so the
+  encoder merges by rank.
+- **Control tokens arrive as text.** The chat template writes `</s>` literally,
+  and it must become token 2, not five characters.
+
+### Decode attention: the latency was hiding in the position
+
+Decode measured slower than prefill although both run the same step. Timing the
+step at increasing positions found why:
+
+| position | single warp | warp per head |
+|---|---|---|
+| 16 | 8.90 ms | **7.76 ms** |
+| 128 | 47.61 ms | **8.47 ms** |
+| 1008 | 77.17 ms | **15.54 ms** |
+
+The first attention kernel ran all 32 heads on **one warp**, walking every
+cached key per head - latency linear in position on a single warp. The fix
+launches one warp per head, strides each head's keys across its lanes, and
+replaces the key-by-key online softmax with reductions across the warp (max,
+normalizer, weighted sum). **5.0x at position 1008**, and prefill and decode
+throughput now agree, which is what confirms the diagnosis. Both kernels are
+kept and tested against the reference.
+
+### What CUDA graphs were worth
+
+**6% on decode.** Project 14 measured 6.84x for a chain of tiny kernels; here
+each token launches ~270 kernels whose work, not their launch, dominates. The
+graphs work - every per-token launch reads its position from device memory, so
+they are byte-identical and capturable - they just have little to remove.
+
+### Honest limits
+
+- The KV cache is **contiguous** on the device. 01-gguf-inference's paged cache
+  gathers pages to the host, which a device decode loop cannot use; paging the
+  device cache is not done.
+- Prefill runs token by token through the decode path. A batched prefill with
+  18-flash-attention's fused kernel and 17-tc-gemm's GEMM is the obvious next
+  step and is not built.
+- The attention kernels are compiled for head_dim 64 and at most 32 heads, which
+  covers the Llama-family models of this size but not larger ones.
 
 ## Error paths (`error-paths`)
 

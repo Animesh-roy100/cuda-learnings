@@ -107,6 +107,7 @@ add_subdirectory(15-warp-primitives)
 add_subdirectory(16-layout-advanced)
 add_subdirectory(17-tc-gemm)
 add_subdirectory(18-flash-attention)
+add_subdirectory(19-llm-engine)
 add_subdirectory(error-paths)
 
 message(STATUS "")

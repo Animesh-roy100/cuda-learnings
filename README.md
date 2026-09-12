@@ -35,14 +35,14 @@ same architecture this targets. The code runs unmodified; only the machine
 around it changes (Linux, CUDA 12, 16 GB instead of 4).
 
 **[COLAB.md](COLAB.md)** has the full walkthrough, including a single cell that
-goes from nothing to a passing 350-test suite.
+goes from nothing to a passing 370-test suite.
 
 ## Layout
 
 ```
 cuda-learning/     fundamentals — grid/block model, memory hierarchy, tiling
 cuda-projects/     five standalone programs, one file each
-cuda-portfolio/    eighteen production-structured systems: CMake, tests, profiling
+cuda-portfolio/    nineteen production-structured systems: CMake, tests, profiling
 cuda.code-workspace   opens all three in VS Code
 ```
 
@@ -66,7 +66,7 @@ indexing with DBSCAN, a zero-copy/CUDA-IPC pipeline, and Monte Carlo pricing.
 
 ### `cuda-portfolio/` — production structure
 
-Eighteen systems with modern CMake, GoogleTest suites, and profiling scripts.
+Nineteen systems with modern CMake, GoogleTest suites, and profiling scripts.
 Public headers contain **no CUDA syntax** (pimpl), so tests and host code
 compile as plain C++20 and only `.cu` files need nvcc.
 
@@ -78,7 +78,7 @@ cd build && ctest --output-on-failure
 ```
 
 ```
-100% tests passed out of 20 suites     (350 test cases)
+100% tests passed out of 21 suites     (370 test cases)
 ```
 
 | # | Project | Headline result |
@@ -101,6 +101,7 @@ cd build && ctest --output-on-failure
 | 16 | Layout & advanced subsystems | SoA **1.80×**; tile padding **7.91×** for 128 bytes; WMMA **2.45×** on a card with "no Tensor Cores" |
 | 17 | Tensor-core GEMM vs cuBLAS | INT8 tensor cores **7.1x** `__dp4a`; 12.8% of cuBLAS INT8; FP16 loses to cuBLAS FP32 outright |
 | 18 | FlashAttention-style fused attention | **17-33x less memory**; 3-4x *slower* than materialized cuBLAS until the score matrix exceeds VRAM, then 3.2x faster |
+| 19 | LLM inference engine (TinyLlama, GGUF) | **130 tok/s** decode, perplexity 5.55; float path matches a host reference to 2.9e-6 |
 
 Each project's README documents its own measurements in detail.
 
@@ -210,6 +211,12 @@ put the parallelism on the side that *isn't* skewed.
   cost 1.3x - and the kernel still lost. The occupancy API showed why: the 32 KB
   staging arrays let 2 blocks fit per SM, so it ran with **2 compute warps against
   32**. A plausible explanation that was partly true hid the one that mattered.
+- **Two implementations agreeing proved nothing** (LLM engine). The device
+  engine matched the host reference to 3e-6 and both produced nonsense: the bug
+  was in what they shared, a Q6_K bit layout written from memory. It was found by
+  scoring all 36 candidate layouts by the perplexity of their predictions - 4.99
+  for the right one, 377 to 352,000 for the rest - which proved the rest of the
+  model correct in the same run.
 - **Tests that pass against the bug prove nothing.** A test measuring a 40-byte
   VRAM leak through `cudaMemGetInfo` passed on the unfixed code - the leak was
   below the resolution of the measurement. It was deleted, not kept as a green

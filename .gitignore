@@ -30,3 +30,6 @@ desktop.ini
 
 # compute-sanitizer logs (scripts/sanitize.*)
 cuda-portfolio/sanitizer/
+
+# Downloaded model weights (scripts/fetch_model.*) -- never committed
+cuda-portfolio/models/

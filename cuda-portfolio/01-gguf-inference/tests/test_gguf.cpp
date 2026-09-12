@@ -158,15 +158,16 @@ TEST(Gguf, RejectsElementCountNotMultipleOfBlockSize) {
     EXPECT_THROW(GgufFile::from_memory(w.bytes), std::runtime_error);
 }
 
-TEST(Gguf, SkipsArrayMetadataAndKeepsParsing) {
+TEST(Gguf, KeepsArrayMetadataAndParsesPastIt) {
+    // A tokenizer lives in array metadata: vocabulary strings, merge scores and
+    // token types. They must be kept, and parsed exactly, or every key after
+    // them is read from the wrong offset.
     GgufWriter w;
     w.raw("GGUF", 4);
     w.u32(3);
     w.u64(0);
-    w.u64(2);
+    w.u64(4);
 
-    // An array of 3 strings, which this engine does not need but must skip
-    // correctly to find the next key.
     w.str("tokenizer.ggml.tokens");
     w.u32(9);                       // ARRAY
     w.u32(8);                       // of STRING
@@ -175,6 +176,20 @@ TEST(Gguf, SkipsArrayMetadataAndKeepsParsing) {
     w.str("bb");
     w.str("ccc");
 
+    w.str("tokenizer.ggml.scores");
+    w.u32(9);                       // ARRAY
+    w.u32(6);                       // of FLOAT32
+    w.u64(2);
+    w.f32(-1.5f);
+    w.f32(2.25f);
+
+    w.str("tokenizer.ggml.token_type");
+    w.u32(9);                       // ARRAY
+    w.u32(5);                       // of INT32
+    w.u64(2);
+    w.u32(1);
+    w.u32(6);
+
     w.str("after.array");
     w.u32(5);                       // INT32
     w.u32(4242);
@@ -182,6 +197,34 @@ TEST(Gguf, SkipsArrayMetadataAndKeepsParsing) {
     w.pad_to(32);
     auto f = GgufFile::from_memory(w.bytes);
     EXPECT_EQ(f.meta_int("after.array").value_or(-1), 4242);
+
+    const auto* tokens = f.meta_string_array("tokenizer.ggml.tokens");
+    ASSERT_NE(tokens, nullptr);
+    EXPECT_EQ(*tokens, (std::vector<std::string>{"a", "bb", "ccc"}));
+
+    const auto* scores = f.meta_float_array("tokenizer.ggml.scores");
+    ASSERT_NE(scores, nullptr);
+    ASSERT_EQ(scores->size(), 2u);
+    EXPECT_DOUBLE_EQ((*scores)[0], -1.5);
+    EXPECT_DOUBLE_EQ((*scores)[1], 2.25);
+
+    const auto* types = f.meta_int_array("tokenizer.ggml.token_type");
+    ASSERT_NE(types, nullptr);
+    EXPECT_EQ(*types, (std::vector<std::int64_t>{1, 6}));
+
+    // Wrong element type or absent key: null, not a throw.
+    EXPECT_EQ(f.meta_float_array("tokenizer.ggml.tokens"), nullptr);
+    EXPECT_EQ(f.meta_string_array("no.such.key"), nullptr);
+}
+
+TEST(Gguf, KQuantSuperBlockSizesMatchGgml) {
+    // From the ggml block_q6_K struct: 128 bytes of low 4 bits, 64 bytes of high
+    // 2 bits, 16 int8 sub-block scales and one fp16 super-scale = 210 bytes per
+    // 256 weights.
+    EXPECT_EQ(llm::type_traits(GgmlType::Q6_K).block_elems, 256);
+    EXPECT_EQ(llm::type_traits(GgmlType::Q6_K).block_bytes, 210);
+    EXPECT_EQ(llm::type_traits(GgmlType::Q4_K).block_bytes, 144);
+    EXPECT_EQ(llm::type_traits(GgmlType::Q8_K).block_bytes, 292);
 }
 
 TEST(Gguf, TypeTraitsMatchSpec) {

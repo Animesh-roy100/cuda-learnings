@@ -33,6 +33,14 @@ enum class GgmlType : std::uint32_t {
     Q5_1 = 7,
     Q8_0 = 8,
     Q8_1 = 9,
+    // K-quants: 256 elements per super-block. Quantized model files commonly
+    // keep the output projection in Q6_K even when every other matrix is Q4_0.
+    Q2_K = 10,
+    Q3_K = 11,
+    Q4_K = 12,
+    Q5_K = 13,
+    Q6_K = 14,
+    Q8_K = 15,
     Unknown = 0xFFFFFFFFu,
 };
 
@@ -77,6 +85,13 @@ public:
     std::optional<std::int64_t> meta_int(const std::string& key) const;
     std::optional<double> meta_float(const std::string& key) const;
     std::optional<std::string> meta_string(const std::string& key) const;
+
+    // Array metadata -- a tokenizer's vocabulary, scores and token types. Null
+    // when the key is absent or holds a different element type. Arrays of
+    // arrays are parsed past but not kept.
+    const std::vector<std::string>* meta_string_array(const std::string& key) const;
+    const std::vector<double>* meta_float_array(const std::string& key) const;
+    const std::vector<std::int64_t>* meta_int_array(const std::string& key) const;
 
     // Pointer into the mapped blob. Valid while this object lives.
     const void* tensor_data(const GgufTensor& t) const;
