@@ -101,6 +101,18 @@ MetaValue read_value(Cursor& c, MetaType t) {
     }
 }
 
+// Tensor sizes are products of four untrusted 64-bit values. Every product is
+// checked, and capped well below 2^64 so that later byte arithmetic (elements
+// times bytes per block, offset plus size) cannot wrap either.
+constexpr std::uint64_t kMaxElements = std::uint64_t(1) << 50;
+
+std::uint64_t checked_mul(std::uint64_t a, std::uint64_t b, const std::string& what) {
+    if (a != 0 && b > kMaxElements / a)
+        throw std::runtime_error("GGUF: " + what + " overflows (" + std::to_string(a) + " x " +
+                                 std::to_string(b) + ")");
+    return a * b;
+}
+
 }  // namespace
 
 TypeTraits type_traits(GgmlType t) {
@@ -224,40 +236,70 @@ void GgufFile::Impl::parse() {
         }
     }
 
+    // Alignment comes from metadata, which is untrusted: it must be a power of
+    // two, or both the data offset and every tensor's alignment are meaningless.
+    std::uint64_t align = 32;
+    if (auto it = meta.find("general.alignment"); it != meta.end()) {
+        auto* v = std::get_if<std::int64_t>(&it->second);
+        if (!v || *v <= 0 || (*v & (*v - 1)) != 0 || *v > (1 << 20))
+            throw std::runtime_error("GGUF: general.alignment must be a power of two");
+        align = static_cast<std::uint64_t>(*v);
+    }
+
     tensors.reserve(static_cast<std::size_t>(n_tensors));
+    std::map<std::string, int> seen;
     for (std::uint64_t i = 0; i < n_tensors; ++i) {
         GgufTensor t;
         t.name = c.str();
+        if (!seen.emplace(t.name, 0).second)
+            throw std::runtime_error("GGUF: duplicate tensor name '" + t.name + "'");
         std::uint32_t nd = c.pod<std::uint32_t>();
-        if (nd == 0 || nd > 4) throw std::runtime_error("GGUF: bad tensor rank");
-        for (std::uint32_t d = 0; d < nd; ++d) t.dims.push_back(c.pod<std::uint64_t>());
+        if (nd == 0 || nd > 4) throw std::runtime_error("GGUF: bad tensor rank for '" + t.name + "'");
+        std::uint64_t elements = 1;
+        for (std::uint32_t d = 0; d < nd; ++d) {
+            const std::uint64_t dim = c.pod<std::uint64_t>();
+            if (dim == 0) throw std::runtime_error("GGUF: tensor '" + t.name + "' has a zero dimension");
+            elements = checked_mul(elements, dim, "element count of '" + t.name + "'");
+            t.dims.push_back(dim);
+        }
         t.type = static_cast<GgmlType>(c.pod<std::uint32_t>());
         t.offset = c.pod<std::uint64_t>();
 
         auto tr = type_traits(t.type);
         if (tr.block_bytes == 0)
             throw std::runtime_error("GGUF: unsupported tensor type in '" + t.name + "'");
-        if (t.num_elements() % tr.block_elems != 0)
+        if (elements % tr.block_elems != 0)
             throw std::runtime_error("GGUF: '" + t.name + "' element count is not a multiple "
                                      "of the block size for " + tr.name);
+        (void)checked_mul(elements / tr.block_elems, tr.block_bytes, "byte size of '" + t.name + "'");
+        if (t.offset % align != 0)
+            throw std::runtime_error("GGUF: tensor '" + t.name + "' offset is not aligned to " +
+                                     std::to_string(align));
         tensors.push_back(std::move(t));
     }
-
-    std::uint64_t align = 32;
-    if (auto it = meta.find("general.alignment"); it != meta.end())
-        if (auto* v = std::get_if<std::int64_t>(&it->second); v && *v > 0)
-            align = static_cast<std::uint64_t>(*v);
 
     std::size_t off = c.offset();
     data_offset = static_cast<std::size_t>((off + align - 1) / align * align);
     if (data_offset > size) throw std::runtime_error("GGUF: data section starts past end");
 
-    // Every tensor must lie wholly inside the blob. Checking once here means
-    // tensor_data() can hand out pointers without re-validating.
+    // Every tensor must lie wholly inside the blob, and no two may overlap.
+    // Checking once here means tensor_data() can hand out pointers without
+    // re-validating. The comparisons are arranged so none of them can wrap.
+    const std::uint64_t blob = size - data_offset;
+    std::vector<std::pair<std::uint64_t, const GgufTensor*>> by_offset;
     for (const auto& t : tensors) {
-        std::uint64_t end = t.offset + t.num_bytes();
-        if (end < t.offset || data_offset + end > size)
+        const std::uint64_t bytes = t.num_bytes();
+        if (t.offset > blob || bytes > blob - t.offset)
             throw std::runtime_error("GGUF: tensor '" + t.name + "' runs past end of file");
+        by_offset.emplace_back(t.offset, &t);
+    }
+    std::sort(by_offset.begin(), by_offset.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (std::size_t i = 1; i < by_offset.size(); ++i) {
+        const auto* prev = by_offset[i - 1].second;
+        if (prev->offset + prev->num_bytes() > by_offset[i].first)
+            throw std::runtime_error("GGUF: tensors '" + prev->name + "' and '" +
+                                     by_offset[i].second->name + "' overlap");
     }
 }
 

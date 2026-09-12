@@ -238,6 +238,91 @@ TEST(Gguf, TypeTraitsMatchSpec) {
     EXPECT_EQ(llm::type_traits(GgmlType::F16).block_bytes, 2);
 }
 
+// ---------------------------------------------------------------------------
+// Hostile headers. Each builds a file that is well-formed except for one lie.
+// ---------------------------------------------------------------------------
+namespace {
+
+struct TensorDesc {
+    std::string name;
+    std::vector<std::uint64_t> dims;
+    std::uint32_t type = 0;   // F32
+    std::uint64_t offset = 0;
+};
+
+std::vector<std::uint8_t> make_gguf(const std::vector<TensorDesc>& tensors, std::size_t data_bytes,
+                                    long long alignment = -1) {
+    GgufWriter w;
+    w.raw("GGUF", 4);
+    w.u32(3);
+    w.u64(tensors.size());
+    w.u64(alignment >= 0 ? 1 : 0);
+    if (alignment >= 0) {
+        w.str("general.alignment");
+        w.u32(4);   // UINT32
+        w.u32(static_cast<std::uint32_t>(alignment));
+    }
+    for (const auto& t : tensors) {
+        w.str(t.name);
+        w.u32(static_cast<std::uint32_t>(t.dims.size()));
+        for (auto d : t.dims) w.u64(d);
+        w.u32(t.type);
+        w.u64(t.offset);
+    }
+    w.pad_to(alignment > 0 ? std::size_t(alignment) : 32);
+    w.bytes.resize(w.bytes.size() + data_bytes, 0);
+    return w.bytes;
+}
+
+void expect_rejected(const std::vector<std::uint8_t>& bytes, const std::string& fragment) {
+    try {
+        GgufFile::from_memory(bytes);
+        FAIL() << "accepted a file that should be rejected for: " << fragment;
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find(fragment), std::string::npos)
+            << "wrong reason: " << e.what();
+    }
+}
+
+}  // namespace
+
+TEST(GgufHostile, RejectsAZeroDimension) {
+    expect_rejected(make_gguf({{"t", {4, 0}}}, 64), "zero dimension");
+}
+
+TEST(GgufHostile, RejectsDimensionsWhoseProductOverflows) {
+    // 2^40 x 2^40 wraps a 64-bit count many times over.
+    expect_rejected(make_gguf({{"t", {std::uint64_t(1) << 40, std::uint64_t(1) << 40}}}, 64),
+                    "overflows");
+}
+
+TEST(GgufHostile, RejectsAMisalignedOffset) {
+    expect_rejected(make_gguf({{"t", {4}, 0, 3}}, 64), "not aligned");
+}
+
+TEST(GgufHostile, RejectsOverlappingTensors) {
+    // Two 32-byte F32 tensors, the second starting inside the first.
+    expect_rejected(make_gguf({{"a", {8}, 0, 0}, {"b", {8}, 0, 16}}, 96, 16), "overlap");
+}
+
+TEST(GgufHostile, RejectsDuplicateTensorNames) {
+    expect_rejected(make_gguf({{"a", {4}, 0, 0}, {"a", {4}, 0, 32}}, 64), "duplicate");
+}
+
+TEST(GgufHostile, RejectsANonPowerOfTwoAlignment) {
+    expect_rejected(make_gguf({{"t", {4}, 0, 0}}, 64, 24), "power of two");
+}
+
+TEST(GgufHostile, RejectsAnOffsetPastTheEndWithoutWrapping) {
+    // offset + size would wrap to a small number if added naively.
+    expect_rejected(make_gguf({{"t", {4}, 0, 0xFFFFFFFFFFFFFFE0ull}}, 64), "past end");
+}
+
+TEST(GgufHostile, AcceptsAdjacentTensorsThatDoNotOverlap) {
+    auto f = GgufFile::from_memory(make_gguf({{"a", {8}, 0, 0}, {"b", {8}, 0, 32}}, 64, 16));
+    EXPECT_EQ(f.tensors().size(), 2u);
+}
+
 TEST(Gguf, OpenMissingFileThrows) {
     EXPECT_THROW(GgufFile::open("this_file_does_not_exist_12345.gguf"), std::runtime_error);
 }

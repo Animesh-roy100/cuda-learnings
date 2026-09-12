@@ -11,7 +11,8 @@
 #include <string>
 #include <vector>
 
-#include "engine.h"
+#include "quant.h"
+#include "reference.h"
 #include "gguf.h"
 
 namespace llm {
