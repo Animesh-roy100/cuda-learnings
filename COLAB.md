@@ -98,7 +98,7 @@ for f in ["01-quant-llm/quant_gemv.cu", "02-hash-table/hash_table.cu",
 Colab's sandbox may restrict process spawning — if it fails, that is the
 environment, not the code.
 
-## Step 5 — the full portfolio (13 projects, 169 tests)
+## Step 5 — the full portfolio (14 projects, 185 tests)
 
 ```python
 %cd /content/cuda-learnings/cuda-portfolio
@@ -115,7 +115,7 @@ A full build takes **5–10 minutes** on Colab's CPU allocation.
 %cd ..
 ```
 
-Expect `100% tests passed out of 14`. Every test is written against an
+Expect `100% tests passed out of 15`. Every test is written against an
 independent reference (CPU models, NIST vectors, closed-form Black-Scholes,
 brute-force k-NN, Dijkstra), so passing on different hardware is meaningful
 rather than tautological.
@@ -150,7 +150,7 @@ anything. That is expected, not a hang.
 | Thing | Why | What to do |
 |---|---|---|
 | `build.bat` | Windows batch | use `build.sh` |
-| `scripts/profile.ps1` | PowerShell | see below |
+| `scripts/profile.ps1` | PowerShell | use `scripts/run_nsys.sh` and `scripts/run_ncu.sh` |
 | `scripts/verify_all.ps1` | PowerShell | run `ctest` and the benchmarks directly |
 | **Nsight Compute (`ncu`)** | needs GPU performance counter access, which hosted VMs generally withhold | expect `ERR_NVGPUCTRPERM`; try it, but do not count on it |
 | **Nsight Systems (`nsys`)** | usually present | often works; try it |
@@ -163,8 +163,8 @@ Nsight Systems is worth trying, since timelines are the more useful artifact
 anyway:
 
 ```python
-!which nsys || apt-get install -y -q nsight-systems 2>/dev/null | tail -1
-!nsys profile --trace cuda --output /content/trace ./build/bin/bench_mc
+!chmod +x scripts/*.sh
+!./scripts/run_nsys.sh bench_mc
 ```
 
 Download `/content/trace.nsys-rep` and open it in Nsight Systems locally.
@@ -191,6 +191,21 @@ below are in the benchmark sources; edit and rebuild.
 Raising `L` in the ANN benchmark also increases host-side k-means time, which
 is O(sample × nlist × dim) on one core. Raise the list count and the training
 sample together only if you are willing to wait.
+
+
+## One project that will behave differently on Colab
+
+`14-primitives` measures Unified Memory, and its result is **driver-model
+dependent**. On the Windows machine this was written on, `concurrentManagedAccess`
+reports 0, so `cudaMemAdvise` and `cudaMemPrefetchAsync` are unavailable and the
+benchmark skips those rows.
+
+On Linux the same Turing silicon reports **1**. So on Colab you should see all
+four memory modes run, including the two that are skipped locally — which makes
+the T4 the better place to study that particular comparison. If the managed
+rows still lose to explicit copies there, that is a real result about page
+migration; if prefetching closes the gap, that is the feature working as
+designed and worth seeing.
 
 ## Colab-specific annoyances
 

@@ -35,7 +35,7 @@ goes from nothing to a passing 169-test suite.
 ```
 cuda-learning/     fundamentals — grid/block model, memory hierarchy, tiling
 cuda-projects/     five standalone programs, one file each
-cuda-portfolio/    thirteen production-structured systems: CMake, tests, profiling
+cuda-portfolio/    fourteen production-structured systems: CMake, tests, profiling
 cuda.code-workspace   opens all three in VS Code
 ```
 
@@ -59,7 +59,7 @@ indexing with DBSCAN, a zero-copy/CUDA-IPC pipeline, and Monte Carlo pricing.
 
 ### `cuda-portfolio/` — production structure
 
-Thirteen systems with modern CMake, GoogleTest suites, and profiling scripts.
+Fourteen systems with modern CMake, GoogleTest suites, and profiling scripts.
 Public headers contain **no CUDA syntax** (pimpl), so tests and host code
 compile as plain C++20 and only `.cu` files need nvcc.
 
@@ -71,7 +71,7 @@ cd build && ctest --output-on-failure
 ```
 
 ```
-100% tests passed out of 14 suites     (169 test cases)
+100% tests passed out of 15 suites     (185 test cases)
 ```
 
 | # | Project | Headline result |
@@ -89,12 +89,13 @@ cd build && ctest --output-on-failure
 | 11 | Optical flow (KLT) | 1080p Harris **2346 fps**, tracking error **0.008 px** |
 | 12 | SHA-256 proof of work | **1.26 GH/s**, ~72% of integer peak, zero register spill |
 | 13 | SpMV + conjugate gradient | 4 formats; hybrid uses **23 MB where ELLPACK needs 3.8 GB** |
+| 14 | CUDA primitives, isolated | Graphs **6.84×**; bank conflicts **4.41×**; managed memory **8× slower** |
 
 Each project's README documents its own measurements in detail.
 
-## Six "obvious" optimizations that lost when measured
+## Seven "obvious" optimizations that lost when measured
 
-Every one of these is standard advice. All six were slower here:
+Every one of these is standard advice. All seven were slower here:
 
 - **Warp-cooperative hash probing** — 0.52× at load factor 0.5. It spends a
   256-byte transaction per query when the average probe chain is 1.5 slots.
@@ -115,6 +116,11 @@ Every one of these is standard advice. All six were slower here:
 - **Warp-per-row SpMV** — the *slowest* of four formats on matrices with
   uniform short rows, because 31 of 32 lanes sit idle. It is the second
   fastest on a skewed matrix. Same kernel, opposite verdict.
+
+- **Unified Memory** — 8× slower than explicit copies for a host-produces /
+  GPU-transforms / host-consumes workload, because every pass migrates the whole
+  buffer both ways. And on this driver model `cudaMemAdvise` and
+  `cudaMemPrefetchAsync` are not merely unhelpful, they are unavailable.
 
 Also: **push PageRank beat pull**, the opposite of the usual guidance. The skew
 decides it — this graph has uniform out-degrees and power-law in-degrees, so
@@ -149,6 +155,17 @@ put the parallelism on the side that *isn't* skewed.
   bandwidth. An impossible number is the most reliable signal available that the
   measurement, not the code, is broken.
 
+- **A read the compiler deleted** (primitives). The host-side "touch" that was
+  supposed to force page migration was written `(void)m[i]`, which the optimiser
+  elides outright. No read, no migration — and Unified Memory appeared **21×
+  faster** than explicit copies. Accumulating into a value that is observed later
+  made the read real, and the true answer is 8× *slower*.
+- **A sticky error that took down four tests** (primitives). Calling
+  `cudaMemAdvise` without `concurrentManagedAccess` returns
+  `cudaErrorInvalidDevice`, which poisons the CUDA context so every later kernel
+  launch in the process fails too. Three unrelated test suites failed downstream
+  of it. Capability-gated APIs have to be checked before the call, not after.
+
 ## Method notes
 
 1. **Decide memory-bound vs compute-bound before optimising.** Eleven of these
@@ -174,6 +191,10 @@ put the parallelism on the side that *isn't* skewed.
   code — use `constexpr`.
 - Math-library DLLs live in `bin/x64`, not `bin`. A shell opened before the
   toolkit was installed dies with `0xC0000135` and no message.
+- `cudaMemAdvise` and `cudaMemPrefetchAsync` now take a `cudaMemLocation`
+  struct where CUDA 12 took a device ordinal. Code written for either fails to
+  compile on the other; `14-primitives` keeps both behind a `CUDART_VERSION`
+  check so one source builds on CUDA 12 and 13 alike.
 - `nsys --trace osrt` is Linux-only and rejects the whole invocation on Windows.
 - Windows PowerShell turns *any* native-tool stderr into a terminating error
   under `$ErrorActionPreference = "Stop"` — a benign nsys warning aborts the

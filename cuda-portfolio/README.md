@@ -1,6 +1,6 @@
 # CUDA systems portfolio — GTX 1650 (Turing, `sm_75`)
 
-Thirteen production-structured CUDA projects. Every one builds, runs, and
+Fourteen production-structured CUDA projects. Every one builds, runs, and
 self-verifies against an independent reference. **Every number below was
 measured on this machine**, not estimated.
 
@@ -22,7 +22,7 @@ cd build && ctest --output-on-failure
 ```
 
 ```
-100% tests passed out of 14       (169 test cases across 13 projects)
+100% tests passed out of 15       (185 test cases across 14 projects)
 ```
 
 | Suite | Cases | | Suite | Cases |
@@ -366,6 +366,67 @@ Hybrid does the same work in 23 MB.
 Dot products accumulate in **double**: CG compares residuals shrinking by orders
 of magnitude, and FP32 accumulation destroys exactly the digits the stopping
 test depends on. The SpMV stays FP32; only the reduction needs the precision.
+
+## 14. CUDA primitives, measured in isolation (`14-primitives`)
+
+The other thirteen projects solve problems and use whatever primitives those
+problems need. This one inverts that: each section isolates ONE mechanism, so
+the number is attributable to that mechanism and nothing else.
+
+**CUDA Graphs** — launch overhead on a chain of tiny kernels:
+
+| kernels/iter | stream | graph | speedup |
+|---|---|---|---|
+| 1 | 1.94 ms | 1.72 ms | 1.13x |
+| 10 | 18.22 ms | 2.66 ms | 6.84x |
+| 100 | 178.38 ms | 26.06 ms | **6.84x** |
+| 200 | 176.98 ms | 29.56 ms | 5.99x |
+
+About **7.6 microseconds saved per launch**, and results bit-identical to the
+stream path. The single-kernel row is the control: with nothing to amortise
+graphs do essentially nothing, which is the correct behaviour and worth showing.
+
+**Unified Memory** — 16 MB, host produces, GPU transforms, host consumes:
+
+| mode | ms/pass |
+|---|---|
+| explicit copy | 17.4 |
+| managed (naive) | **138.5 — 8x slower** |
+| managed + advise | unavailable |
+| managed + prefetch | unavailable |
+
+Managed memory is dramatically *worse* here, and both tuning APIs are
+unavailable: this device reports `concurrentManagedAccess = 0`, which is the
+Windows WDDM driver model, and **both `cudaMemAdvise` and `cudaMemPrefetchAsync`
+return `cudaErrorInvalidDevice` without it**. The same GPU on Linux reports 1 and
+the rows run — the limit is the driver model, not the hardware.
+
+**Shared memory bank conflicts** — 32 banks, one warp per block:
+
+| stride | conflict | vs stride-1 |
+|---|---|---|
+| 1 | none | 1.00x |
+| 4 | 4-way | 1.24x |
+| 16 | 16-way | 2.58x |
+| 32 | 32-way | **4.41x** |
+
+**Occupancy** — and why it is not a performance target:
+
+| block | occupancy | measured |
+|---|---|---|
+| 32 | 50% | 1.276 ms |
+| 128 | 100% | **0.824 ms** |
+| 256 | 100% | 0.920 ms |
+| 1024 | 100% | 1.065 ms |
+
+Block sizes 64–1024 all reach **100% occupancy** and still differ by ~25% in
+runtime. `cudaOccupancyMaxPotentialBlockSize` suggests **1024 — the slowest row
+here**. It optimises occupancy, which is what it claims; it does not promise
+speed. Treat it as a starting point to measure from.
+
+**`__activemask`** — divergence made visible. A warp split by `lane & 1`: even
+lanes see `0x55555555`, odd lanes `0xAAAAAAAA`, 16 active each. The hardware
+runs the halves in sequence and each half sees only itself.
 
 ## Cross-cutting lessons
 

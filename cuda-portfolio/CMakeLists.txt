@@ -102,6 +102,7 @@ add_subdirectory(10-dpi-matching)
 add_subdirectory(11-optical-flow)
 add_subdirectory(12-crypto-hash)
 add_subdirectory(13-spmv)
+add_subdirectory(14-primitives)
 
 message(STATUS "")
 message(STATUS "cuda_portfolio configured")
