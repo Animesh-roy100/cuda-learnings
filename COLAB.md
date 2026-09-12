@@ -120,11 +120,9 @@ independent reference (CPU models, NIST vectors, closed-form Black-Scholes,
 brute-force k-NN, Dijkstra), so passing on different hardware is meaningful
 rather than tautological.
 
-**One result should differ sharply on a T4.** `16-layout-advanced` measures
-`wmma` against a tuned FP32 SGEMM and gets **2.45×** on a GTX 1650, which NVIDIA
-lists as having no Tensor Cores. The T4 has 320 of them. Run
-`./build/bin/bench_layout_advanced` and compare the three-kernel table — it is
-the clearest before/after in this repo, on identical source.
+Two results should differ sharply on a T4 — see
+[Two projects that behave differently on Colab](#two-projects-that-behave-differently-on-colab)
+below. Those are the ones worth running first.
 
 
 Then run whichever benchmarks interest you:
@@ -136,9 +134,11 @@ Then run whichever benchmarks interest you:
 !./build/bin/bench_spmv        # four sparse formats compared
 !./build/bin/bench_ann         # IVF-Flat recall/latency curve
 !./build/bin/bench_sha256      # SHA-256 hashrate + register pressure
+!./build/bin/bench_warp_primitives   # every shuffle/vote/atomic/intrinsic
+!./build/bin/bench_layout_advanced   # AoS-vs-SoA, bank conflicts, WMMA, cg
 ```
 
-All thirteen, if you want the full sweep (about 5 minutes):
+All sixteen, if you want the full sweep (about 6 minutes):
 
 ```python
 import subprocess, glob, os
@@ -162,9 +162,20 @@ anything. That is expected, not a hang.
 | **Nsight Compute (`ncu`)** | needs GPU performance counter access, which hosted VMs generally withhold | expect `ERR_NVGPUCTRPERM`; try it, but do not count on it |
 | **Nsight Systems (`nsys`)** | usually present | often works; try it |
 
-> I have not verified the profiling rows on Colab myself — everything else in
-> this guide follows from the code, but those two depend on how Google
-> configures its tenant VMs and may differ from what you find.
+> **What is and is not verified.** Every measurement quoted in this repo was
+> taken on the Windows/MSVC machine it was written on. No part of this has been
+> compiled with gcc or run on a T4 — the Linux support here is written from the
+> toolchain differences (no `/Zc:preprocessor`, `build.sh` instead of
+> `build.bat`, the `.sh` profiling scripts) rather than from a passing build.
+>
+> If something does fail to build on Colab, the likeliest culprit is
+> `16-layout-advanced`: it is the only target using `-rdc=true` and
+> `cudadevrt`, for the device-side kernel launch, and it overrides the shared
+> CMake defaults to get them. Everything else uses one uniform configuration
+> that has no Windows-specific flags left in it.
+>
+> The profiling rows above are a further step removed: they depend on how
+> Google configures its tenant VMs, not on this code at all.
 
 Nsight Systems is worth trying, since timelines are the more useful artifact
 anyway:
@@ -200,12 +211,17 @@ is O(sample × nlist × dim) on one core. Raise the list count and the training
 sample together only if you are willing to wait.
 
 
-## One project that will behave differently on Colab
+## Two projects that behave differently on Colab
 
-`14-primitives` measures Unified Memory, and its result is **driver-model
-dependent**. On the Windows machine this was written on, `concurrentManagedAccess`
-reports 0, so `cudaMemAdvise` and `cudaMemPrefetchAsync` are unavailable and the
-benchmark skips those rows.
+These are the two places where the T4 is not just a faster GTX 1650 but a
+genuinely different answer, which makes them the most interesting things to run
+there.
+
+### `14-primitives` — Unified Memory
+
+Its result is **driver-model dependent**. On the Windows machine this was
+written on, `concurrentManagedAccess` reports 0, so `cudaMemAdvise` and
+`cudaMemPrefetchAsync` are unavailable and the benchmark skips those rows.
 
 On Linux the same Turing silicon reports **1**. So on Colab you should see all
 four memory modes run, including the two that are skipped locally — which makes
@@ -213,6 +229,30 @@ the T4 the better place to study that particular comparison. If the managed
 rows still lose to explicit copies there, that is a real result about page
 migration; if prefetching closes the gap, that is the feature working as
 designed and worth seeing.
+
+### `16-layout-advanced` — Tensor Cores
+
+This one should change the most. NVIDIA lists the GTX 16-series as having **no
+Tensor Cores**; the T4 has **320**. On the GTX 1650 the benchmark measures:
+
+| kernel | ms | vs above |
+|---|---|---|
+| fp32 operands, fp32 math | 1.192 | — |
+| fp16 operands, fp32 math | 1.190 | 1.00× |
+| fp16 operands, `mma_sync` | 0.485 | **2.45×** |
+
+The middle row is a control: it isolates how much of the gain is the narrower
+fp16 operands rather than the instruction. It measures 1.00×, so on this card
+the whole 2.45× is `mma_sync` — already a contradiction of the spec sheet.
+
+On a T4 the third row should pull far further ahead while the middle row stays
+near 1.00×, because the operand width is not the bottleneck on either card. If
+you run one thing from this repo on Colab, run this and compare the two tables.
+
+The other four sections of that benchmark should be roughly **unchanged**: AoS
+vs SoA, bank-conflict padding and cooperative groups are architectural
+properties both cards share, and `cg::memcpy_async` stays at ~1.00× because the
+T4 is also `sm_75` and `cp.async` needs `sm_80`.
 
 ## Colab-specific annoyances
 
@@ -242,6 +282,13 @@ timings:
 - FP64 running at about 1/32 of FP32 — a Turing hardware property, identical on
   a T4
 - SHA-256 sitting near 70% of integer peak with zero register spill
+- SoA beating AoS by ~1.8× on a partial-field read, and `[32][33]` beating
+  `[32][32]` by several× — both are properties of the memory system, not of the
+  particular chip
+
+The one conclusion that **should** change is the WMMA comparison in
+`16-layout-advanced`. See the section above: that is the point of running it
+there.
 
 If any of those *conclusions* change on a T4, that is genuinely interesting and
 worth investigating. If the raw milliseconds differ, that is just a faster card.
