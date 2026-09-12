@@ -1,0 +1,15 @@
+# Normalise text files in the repository, and pin the two cases where the
+# line ending is not cosmetic.
+* text=auto
+
+# A shell script with CRLF endings fails on Linux with
+#   bad interpreter: /usr/bin/env bash^M
+# which is a confusing way to discover a line-ending problem. Pin to LF.
+*.sh text eol=lf
+
+# Batch files are the mirror case: cmd.exe wants CRLF.
+*.bat text eol=crlf
+
+# Nsight artifacts are binary; never touch them.
+*.nsys-rep binary
+*.ncu-rep binary
