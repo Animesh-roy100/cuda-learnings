@@ -172,6 +172,21 @@ it, the suite includes a host FP32 forward pass that takes about 10 seconds a
 check. On a T4 the decode rate should rise well above the GTX 1650's 130
 tokens/s: the Q4 GEMV is memory-bound, and the T4 has 320 GB/s against 192.
 
+## The PyTorch extension
+
+Colab ships torch with a matching CUDA toolkit, so the extension builds
+directly:
+
+```python
+!pip install --no-build-isolation ./20-torch-extension
+!pytest -q 20-torch-extension/tests
+!python 20-torch-extension/bench.py
+```
+
+The batch-1 advantage over `F.linear` should hold on a T4, since both are
+memory-bound there too. Watch the fp16 column: on the GTX 1650 fp16 linear was
+*slower* than fp32, and a T4 with tensor cores should reverse that.
+
 ## What does *not* work on Colab
 
 | Thing | Why | What to do |

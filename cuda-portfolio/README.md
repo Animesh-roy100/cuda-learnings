@@ -813,6 +813,16 @@ they are byte-identical and capturable - they just have little to remove.
 - The attention kernels are compiled for head_dim 64 and at most 32 heads, which
   covers the Llama-family models of this size but not larger ones.
 
+## 20. PyTorch extension (`20-torch-extension`)
+
+The Q4_0 GEMV from project 19 as a pip-installable PyTorch op with autograd -
+`Q4Linear.from_float(nn.Linear)`. Separate from the CMake build; see
+[its README](20-torch-extension/README.md). At TinyLlama's FFN shape it is
+**2.5x faster than PyTorch's fp32 linear at batch 1** and 1.4x at batch 16, with
+6.4x less weight memory; at batch 128 cuBLAS wins by 3.5x, because a batched
+GEMM amortizes weight reads that a per-element GEMV repeats. 14 tests, every one
+checked against `F.linear` in float64.
+
 ## Error paths (`error-paths`)
 
 Every other suite proves the code is right when things go well. This one proves

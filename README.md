@@ -42,7 +42,7 @@ goes from nothing to a passing 370-test suite.
 ```
 cuda-learning/     fundamentals — grid/block model, memory hierarchy, tiling
 cuda-projects/     five standalone programs, one file each
-cuda-portfolio/    nineteen production-structured systems: CMake, tests, profiling
+cuda-portfolio/    nineteen CMake systems plus a pip-installable PyTorch extension
 cuda.code-workspace   opens all three in VS Code
 ```
 
@@ -102,6 +102,7 @@ cd build && ctest --output-on-failure
 | 17 | Tensor-core GEMM vs cuBLAS | INT8 tensor cores **7.1x** `__dp4a`; 12.8% of cuBLAS INT8; FP16 loses to cuBLAS FP32 outright |
 | 18 | FlashAttention-style fused attention | **17-33x less memory**; 3-4x *slower* than materialized cuBLAS until the score matrix exceeds VRAM, then 3.2x faster |
 | 19 | LLM inference engine (TinyLlama, GGUF) | **130 tok/s** decode, perplexity 5.55; float path matches a host reference to 2.9e-6 |
+| 20 | PyTorch extension: Q4_0 `Q4Linear` | **2.5x** PyTorch fp32 linear at decode batch sizes with 6.4x less memory; cuBLAS wins at batch 128 |
 
 Each project's README documents its own measurements in detail.
 

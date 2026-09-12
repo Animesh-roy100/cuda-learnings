@@ -33,3 +33,12 @@ cuda-portfolio/sanitizer/
 
 # Downloaded model weights (scripts/fetch_model.*) -- never committed
 cuda-portfolio/models/
+
+# ---- Python (20-torch-extension) ----
+__pycache__/
+*.pyc
+*.egg-info/
+*.pyd
+*.so
+.pytest_cache/
+dist/
