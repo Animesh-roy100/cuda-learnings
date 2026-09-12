@@ -314,7 +314,9 @@ TEST(KvCache, ThrowsWhenExhausted) {
 
     // 2 pages x 4 tokens = 8 tokens fit; the 9th must fail cleanly.
     for (int t = 0; t < 8; ++t) c.append(s, 0, k, v);
-    EXPECT_THROW(c.append(s, 0, k, v), std::runtime_error);
+    EXPECT_THROW(c.append(s, 0, k, v), llm::KvCacheExhausted);
+    EXPECT_EQ(c.length(s), 8);
+    EXPECT_EQ(c.next_layer(s), 0);
 }
 
 TEST(KvCache, IndependentSequencesDoNotInterfere) {

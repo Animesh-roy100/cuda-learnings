@@ -10,5 +10,5 @@ cuda_portfolio_add_test(test_gguf
   LINK gguf_inference)
 
 cuda_portfolio_add_test(test_kernels
-  SOURCES tests/test_kernels.cpp
+  SOURCES tests/test_kernels.cpp tests/test_hardening.cpp
   LINK gguf_inference)
