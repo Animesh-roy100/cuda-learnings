@@ -65,9 +65,14 @@ $ncu = Find-Tool "ncu" @(
     "C:\Program Files\NVIDIA Corporation\Nsight Compute *\ncu.bat",
     "C:\Program Files\NVIDIA Corporation\Nsight Compute *\ncu.exe")
 
+# Discovered from the build directory rather than hardcoded: a fixed list goes
+# stale the moment a project is added, and silently profiles less than it
+# claims to. Matches what scripts/run_nsys.sh does on Linux.
 $targets = if ($Target) { @($Target) } else {
-    @("bench_inference", "bench_image", "bench_hash_kv", "bench_spatial",
-      "bench_video", "bench_audio", "bench_mc", "bench_graph")
+    $found = @(Get-ChildItem -Path $binDir -Filter "bench_*.exe" -ErrorAction SilentlyContinue |
+               Sort-Object Name | ForEach-Object { $_.BaseName })
+    if (-not $found) { Write-Warning "no bench_*.exe found in $binDir -- build first" }
+    $found
 }
 
 # Roofline needs achieved compute and DRAM traffic; occupancy explains a kernel

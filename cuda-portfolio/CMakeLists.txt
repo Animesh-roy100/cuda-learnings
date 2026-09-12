@@ -103,6 +103,8 @@ add_subdirectory(11-optical-flow)
 add_subdirectory(12-crypto-hash)
 add_subdirectory(13-spmv)
 add_subdirectory(14-primitives)
+add_subdirectory(15-warp-primitives)
+add_subdirectory(16-layout-advanced)
 
 message(STATUS "")
 message(STATUS "cuda_portfolio configured")

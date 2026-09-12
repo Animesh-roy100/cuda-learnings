@@ -1,11 +1,13 @@
 # CUDA systems portfolio — GTX 1650 (Turing, `sm_75`)
 
-Fourteen production-structured CUDA projects. Every one builds, runs, and
+Sixteen production-structured CUDA projects. Every one builds, runs, and
 self-verifies against an independent reference. **Every number below was
 measured on this machine**, not estimated.
 
 **Hardware:** GTX 1650, Turing `sm_75`, 14 SMs, 896 CUDA cores, 4 GB GDDR6,
-**192 GB/s peak bandwidth**, PCIe gen3 ×16, no Tensor Cores, FP64 at 1/32 rate.
+**192 GB/s peak bandwidth**, PCIe gen3 ×16, FP64 at 1/32 rate, and no Tensor
+Cores according to the spec sheet — a claim project 16 measures and partly
+contradicts.
 
 > The 128 GB/s figure often quoted for the GTX 1650 is the **GDDR5** variant.
 > This is the GDDR6 card: measured 176–184 GB/s in practice. Tuning against
@@ -427,6 +429,141 @@ speed. Treat it as a starting point to measure from.
 **`__activemask`** — divergence made visible. A warp split by `lane & 1`: even
 lanes see `0x55555555`, odd lanes `0xAAAAAAAA`, 16 active each. The hardware
 runs the halves in sequence and each half sees only itself.
+
+## 15. Warp and block primitives (`15-warp-primitives`)
+
+Project 14 isolates *subsystems* — graphs, unified memory, occupancy. This one
+goes a level down to individual **instructions**: every warp shuffle, vote,
+barrier variant, fence, atomic, bit intrinsic and packed dot product, each with
+a host reference that fails if the semantics were misunderstood. 27 tests.
+
+**Shuffles** — lane values 1..32, exchanged through registers, no shared memory:
+
+| intrinsic | lane 0 | lane 31 | what it builds |
+|---|---|---|---|
+| `__shfl_sync(7)` | 8 | 8 | broadcast |
+| `__shfl_up_sync` | 1 | **528** | inclusive prefix scan |
+| `__shfl_down_sync` | **528** | 1024 | reduction tree |
+| `__shfl_xor_sync` | **528** | **528** | butterfly |
+
+528 = 32·33/2 is the warp total. The last two rows are the distinction worth
+remembering: `down` leaves the answer in lane 0 only; `xor` leaves it in *every*
+lane, for the same instruction count.
+
+**Votes** — predicate true on every third lane:
+
+```
+__ballot_sync   0x49249249   01001001001001001001001001001001
+__popc          11 lanes true
+__all_sync      false      __any_sync   true
+__activemask    0xffffffff
+```
+
+The trap here cost a debugging session. Every vote must be evaluated with the
+**whole warp converged**, before any divergence — calling `__all_sync` or
+`__activemask` inside `if (lane == 0)` polls only the lanes still active there,
+which is lane 0 alone. It returns `all_true = true` and `activemask = 0x1`, both
+wrong, both plausible-looking.
+
+**Block barrier variants** — 256 threads, every fourth true: `__syncthreads_count`
+→ 64, `_and` → false, `_or` → true. Each is a barrier *and* a block-wide
+reduction in one instruction; by hand it costs a shared array plus two syncs.
+
+**Atomics** — the full set over 1..1000: add 500500, sub −500500, min 1, max
+1000, and 0, or 1023, xor 1000, exch 128 (nondeterministic by design), CAS 1
+winner of 1000 racers. `atomicInc` → 1000 and `atomicDec` → **4294966296**:
+both **wrap**, they do not saturate.
+
+**Packed dot products** — `__dp4a([1,2,3,4],[10,20,30,40])` = 300 in one
+instruction. `__dp2a([100,200] i16, [7,8] i8)` = 2300 — and it is **mixed**
+precision, int16 against *int8*. Feed it two int16 operands and it compiles,
+runs, and silently reads only the low byte of the second: 700 instead of 2300,
+no error of any kind. The API here is typed `std::int8_t` so the mistake cannot
+be made through it.
+
+**FMA** — `__fmaf_rn(a,b,c)` rounds once; `a*b+c` rounds twice:
+
+| a·b+c | fused | separate | exact |
+|---|---|---|---|
+| (1+ε)(1−ε) − 1 | **−1.421e−14** | 0.000e+00 | −1.421e−14 |
+| 3 · (1/3) − 1 | **2.980e−08** | 0.000e+00 | 2.980e−08 |
+
+The fused result matches the exact double-precision answer; the separate one
+rounds the difference away before the add ever happens and reports a confident
+zero.
+
+**Fences** reported **0 torn reads both with and without** `__threadfence()`.
+That is recorded as-is rather than tidied up: the unfenced path is unsafe *by
+construction*, and absence of a visible failure is not evidence of correctness
+in a memory model. The test suite asserts only on the fenced path.
+
+## 16. Memory layout and advanced subsystems (`16-layout-advanced`)
+
+Six features, each measured on this card rather than quoted from a guide. One
+does not help. One helps considerably more than the spec sheet predicts.
+
+**AoS vs SoA** — 4M particles of 6 floats, kernel reads 3 of them:
+
+| layout | ms | useful GB/s |
+|---|---|---|
+| AoS `{x,y,z,vx,vy,vz}[]` | 0.679 | 98.8 |
+| SoA `x[], y[], z[], ...` | **0.377** | **178.1** |
+
+**1.80× for rearranging the same bytes**, results bit-identical. AoS moves 24
+bytes per particle to use 12 — the unread velocities sit inside the same 32-byte
+sectors the positions do, so DRAM delivers them regardless. SoA reaches **93% of
+peak**; AoS cannot get there at any occupancy.
+
+**Shared-memory bank conflicts** — a 32×32 tile read column-wise:
+
+| declaration | ms |
+|---|---|
+| `tile[32][32]` | 6.097 |
+| `tile[32][33]` | **0.771** |
+
+**7.91× for 128 extra bytes.** At width 32 the whole warp asks for bank `ty` and
+the access serialises 32 ways; at width 33 each row shifts one bank and the lanes
+spread across all 32. One character in a declaration.
+
+**Cooperative groups** — `cg::reduce` over a 32-lane tile → 32, over a
+256-thread block → 256, `grid.size()` → 14336, and `grid.sync()` held across 1M
+elements. The grid size is **not a free choice**: a grid-wide barrier deadlocks
+unless every block is resident simultaneously, so it comes from
+`cudaOccupancyMaxActiveBlocksPerMultiprocessor`, not from the problem size.
+
+**Dynamic parallelism** — the host issued one launch; 8 more came from device
+code. Under CUDA 12+ (CDP2) the device-side `cudaDeviceSynchronize()` **no
+longer exists**; the guarantee that remains is that the parent grid is not
+complete, as the host observes it, until its children are. Costs `-rdc=true`
+and `cudadevrt`, which is why this is the only target in the repo overriding
+`CUDA_SEPARABLE_COMPILATION`.
+
+**Tensor Cores (WMMA)** — 512×512. Two kernels could not have settled this,
+because switching to WMMA also halves the bytes read. Three kernels, one variable
+changed at a time, can:
+
+| kernel | ms | vs above |
+|---|---|---|
+| fp32 operands, fp32 math | 1.192 | — |
+| fp16 operands, fp32 math | 1.190 | 1.00× |
+| fp16 operands, `mma_sync` | **0.485** | **2.45×** |
+
+NVIDIA lists the GTX 16-series as shipping **without** Tensor Cores, so the
+expectation going in was "correct but not faster". The middle row makes the
+answer readable: at this size every byte is reused 512 times, so the kernel is
+compute-bound and narrowing the operands buys **nothing** — leaving the entire
+2.45× on `mma_sync`. Whatever the spec sheet says, this chip retires HMMA
+meaningfully faster than FP32 FMA. Max |wmma − fp32| = 0.0106, which is fp16
+input precision, not a bug; a reading of exactly 0 would mean the fp16 path
+never ran.
+
+**Asynchronous shared-memory copy** — `cg::memcpy_async` vs load-and-barrier:
+0.211 ms vs 0.207 ms, **0.98×**. No speedup, and none was expected.
+`cg::memcpy_async` compiles from sm_70, but the `cp.async` instruction that lets
+DRAM write straight into shared memory arrived with **Ampere, sm_80**. Here it
+falls back to the ordinary load. This is the cleanest example in the repo of the
+thing worth internalising: *the API being available is not the same as the
+hardware being there, and only the clock can tell the two apart.*
 
 ## Cross-cutting lessons
 

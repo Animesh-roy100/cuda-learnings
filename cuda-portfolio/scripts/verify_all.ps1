@@ -76,8 +76,11 @@ Push-Location (Join-Path $root "build")
 $ct = & ctest --output-on-failure 2>&1 | Out-String
 Pop-Location
 if ($ct -match "100% tests passed") {
-    $n = [regex]::Match($ct, "(\d+) tests passed out of (\d+)")
-    Pass "all suites passed ($($n.Groups[2].Value) suites)"
+    # ctest prints "100% tests passed out of 17" -- the token before " tests"
+    # is "100%", not a bare number, so a (\d+) there never matched and the
+    # count came out blank.
+    $n = [regex]::Match($ct, "tests passed out of (\d+)")
+    Pass "all suites passed ($($n.Groups[1].Value) suites)"
     $results["ctest"] = $true
 } else {
     Fail "ctest reported failures"
@@ -88,9 +91,12 @@ if ($ct -match "100% tests passed") {
 # ---------------------------------------------------------------------------
 Section "4. benchmarks"
 $bin = Join-Path $root "build\bin"
-$benches = @('bench_inference','bench_image','bench_hash_kv','bench_spatial',
-             'bench_video','bench_audio','bench_mc','bench_graph')
+# Discovered, not hardcoded -- see the note in profile.ps1. Verifying a subset
+# while reporting "all benchmarks" is worse than not verifying at all.
+$benches = @(Get-ChildItem -Path $bin -Filter "bench_*.exe" -ErrorAction SilentlyContinue |
+             Sort-Object Name | ForEach-Object { $_.BaseName })
 $benchOk = $true
+if (-not $benches) { Fail "no bench_*.exe found in $bin"; $benchOk = $false }
 foreach ($b in $benches) {
     $exe = Join-Path $bin "$b.exe"
     if (-not (Test-Path $exe)) { Fail "$b missing"; $benchOk = $false; continue }
@@ -107,23 +113,44 @@ $results["benchmarks"] = $benchOk
 
 # ---------------------------------------------------------------------------
 if (-not $SkipProfile) {
+    # Both checks are timestamped against the start of THIS run. Counting files
+    # that merely exist made step 6 report PASS after the UAC prompt for ncu was
+    # cancelled: six CSVs from an earlier session were still sitting in
+    # profiles/, and the check could not tell them from fresh output. A
+    # verification script that passes when it produced nothing is worse than no
+    # script at all.
+    $profileDir = Join-Path $root "profiles"
+
     Section "5. nsys timelines"
+    $t0 = Get-Date
     & powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "profile.ps1") -SkipNcu |
         Select-String "wrote|WARNING" | ForEach-Object { Note $_ }
-    $reps = @(Get-ChildItem (Join-Path $root "profiles") -Filter *.nsys-rep -ErrorAction SilentlyContinue)
-    if ($reps.Count -ge 8) { Pass "$($reps.Count) timelines" } else { Fail "only $($reps.Count) timelines" }
-    $results["nsys"] = ($reps.Count -ge 8)
+    $reps = @(Get-ChildItem $profileDir -Filter *.nsys-rep -ErrorAction SilentlyContinue |
+              Where-Object { $_.LastWriteTime -ge $t0 })
+    $want = $benches.Count
+    if ($reps.Count -ge $want) {
+        Pass "$($reps.Count) timelines written this run"
+    } else {
+        Fail "only $($reps.Count) fresh timelines, expected $want"
+    }
+    $results["nsys"] = ($want -gt 0 -and $reps.Count -ge $want)
 
     Section "6. ncu metrics (the post-reboot check)"
+    $t0 = Get-Date
     & powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "profile.ps1") -SkipNsys |
         Select-String "ERR_NVGPUCTRPERM|ncu metrics" | ForEach-Object { Note $_ }
-    $csvs = @(Get-ChildItem (Join-Path $root "profiles") -Filter *_ncu.csv -ErrorAction SilentlyContinue |
-              Where-Object { $_.Length -gt 200 })
+    $csvs = @(Get-ChildItem $profileDir -Filter *_ncu.csv -ErrorAction SilentlyContinue |
+              Where-Object { $_.Length -gt 200 -and $_.LastWriteTime -ge $t0 })
+    $stale = @(Get-ChildItem $profileDir -Filter *_ncu.csv -ErrorAction SilentlyContinue |
+               Where-Object { $_.LastWriteTime -lt $t0 })
     if ($csvs.Count -ge 1) {
-        Pass "$($csvs.Count) ncu CSVs with real data"
+        Pass "$($csvs.Count) ncu CSVs written this run"
         $results["ncu"] = $true
     } else {
-        Fail "no ncu data -- counters still blocked?"
+        Fail "no ncu data produced this run -- counters blocked, or the elevation prompt was declined"
+        if ($stale.Count -gt 0) {
+            Note "$($stale.Count) older CSV(s) remain in profiles/ and were NOT counted"
+        }
         $results["ncu"] = $false
     }
 }

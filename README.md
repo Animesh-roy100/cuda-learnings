@@ -14,12 +14,19 @@ called out rather than quietly dropped.
 |---|---|
 | GPU | GTX 1650 (TU117), Turing `sm_75`, 14 SMs, 896 CUDA cores |
 | Memory | 4 GB GDDR6, **192 GB/s peak** (176–184 GB/s measured) |
-| Notable limits | no Tensor Cores, FP64 at 1/32 rate, PCIe gen3 ×16 |
+| Notable limits | no Tensor Cores *(but see below)*, FP64 at 1/32 rate, PCIe gen3 ×16 |
 | Toolchain | CUDA 13.4, MSVC 19.44, driver 616.92, CMake 4.4, GoogleTest 1.15 |
 
 > The 128 GB/s figure usually quoted for the GTX 1650 is the **GDDR5** variant.
 > This is the GDDR6 card. Tuning against 128 GB/s would mean declaring victory
 > at 67% of the real ceiling.
+
+> **On "no Tensor Cores":** that is NVIDIA's own description of the GTX
+> 16-series, and it predicts that `wmma` should compile, return correct
+> results, and be no faster. Project 16 measures **2.45×** against a tuned
+> FP32 SGEMM — with a third control kernel proving the gain is the `mma_sync`
+> instruction and not the narrower fp16 operands. The spec sheet is kept above
+> as written; the measurement is reported as measured.
 
 ## No GTX 1650? Run it free on Colab
 
@@ -28,14 +35,14 @@ same architecture this targets. The code runs unmodified; only the machine
 around it changes (Linux, CUDA 12, 16 GB instead of 4).
 
 **[COLAB.md](COLAB.md)** has the full walkthrough, including a single cell that
-goes from nothing to a passing 169-test suite.
+goes from nothing to a passing 233-test suite.
 
 ## Layout
 
 ```
 cuda-learning/     fundamentals — grid/block model, memory hierarchy, tiling
 cuda-projects/     five standalone programs, one file each
-cuda-portfolio/    fourteen production-structured systems: CMake, tests, profiling
+cuda-portfolio/    sixteen production-structured systems: CMake, tests, profiling
 cuda.code-workspace   opens all three in VS Code
 ```
 
@@ -59,7 +66,7 @@ indexing with DBSCAN, a zero-copy/CUDA-IPC pipeline, and Monte Carlo pricing.
 
 ### `cuda-portfolio/` — production structure
 
-Fourteen systems with modern CMake, GoogleTest suites, and profiling scripts.
+Sixteen systems with modern CMake, GoogleTest suites, and profiling scripts.
 Public headers contain **no CUDA syntax** (pimpl), so tests and host code
 compile as plain C++20 and only `.cu` files need nvcc.
 
@@ -71,7 +78,7 @@ cd build && ctest --output-on-failure
 ```
 
 ```
-100% tests passed out of 15 suites     (185 test cases)
+100% tests passed out of 17 suites     (233 test cases)
 ```
 
 | # | Project | Headline result |
@@ -90,6 +97,8 @@ cd build && ctest --output-on-failure
 | 12 | SHA-256 proof of work | **1.26 GH/s**, ~72% of integer peak, zero register spill |
 | 13 | SpMV + conjugate gradient | 4 formats; hybrid uses **23 MB where ELLPACK needs 3.8 GB** |
 | 14 | CUDA primitives, isolated | Graphs **6.84×**; bank conflicts **4.41×**; managed memory **8× slower** |
+| 15 | Warp & block primitives | Every shuffle, vote, barrier, atomic and intrinsic, each checked against a host reference |
+| 16 | Layout & advanced subsystems | SoA **1.80×**; tile padding **7.91×** for 128 bytes; WMMA **2.45×** on a card with "no Tensor Cores" |
 
 Each project's README documents its own measurements in detail.
 
@@ -165,12 +174,25 @@ put the parallelism on the side that *isn't* skewed.
   `cudaErrorInvalidDevice`, which poisons the CUDA context so every later kernel
   launch in the process fails too. Three unrelated test suites failed downstream
   of it. Capability-gated APIs have to be checked before the call, not after.
+- **A vote taken after the warp had already split** (warp primitives).
+  `__all_sync` and `__activemask` called inside `if (lane == 0)` poll only the
+  lanes still active *there* — which is lane 0 alone. They returned
+  `all_true = true` and `activemask = 0x1`: both wrong, both entirely
+  plausible-looking. Every vote has to be evaluated with the warp converged,
+  before the branch, and the result carried in.
+- **An API that exists without the hardware behind it** (layout & advanced).
+  `cg::memcpy_async` compiles from sm_70, so it looks available here. The
+  `cp.async` instruction that makes it genuinely asynchronous arrived with
+  Ampere, so on Turing it silently lowers to an ordinary load-and-barrier and
+  measures **0.98×**. Compiling is not evidence of acceleration.
 
 ## Method notes
 
-1. **Decide memory-bound vs compute-bound before optimising.** Eleven of these
-   thirteen are memory bound; Monte Carlo and SHA-256 are compute bound. The
-   right move is opposite in each case.
+1. **Decide memory-bound vs compute-bound before optimising.** Eleven of the
+   thirteen application projects are memory bound; Monte Carlo and SHA-256 are
+   compute bound. The right move is opposite in each case. (14–16 are
+   instrument projects: they measure one mechanism at a time rather than solving
+   a problem.)
 2. **Warm up before timing.** An un-warmed first launch made one GEMV read
    31 GB/s instead of 147, and made zero-copy look faster than VRAM — which is
    physically impossible.
@@ -208,7 +230,7 @@ cd cuda-portfolio
 .\scripts\profile.ps1 -SkipNcu   # timelines only, no elevation needed
 ```
 
-Nsight Systems timelines for all eight benchmarks are committed under
+Nsight Systems timelines for the benchmarks are committed under
 `cuda-portfolio/profiles/`.
 
 **On Nsight Compute:** the documented fix for `ERR_NVGPUCTRPERM` is to set

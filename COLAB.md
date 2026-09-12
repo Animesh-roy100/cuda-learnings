@@ -17,7 +17,7 @@ than the laptop card these numbers came from.
 | SMs / CUDA cores | 14 / 896 | **40 / 2560** |
 | VRAM | 4 GB GDDR6 | **16 GB GDDR6** |
 | Memory bandwidth | 192 GB/s | **320 GB/s** |
-| Tensor Cores | none | **320** (unused by this code) |
+| Tensor Cores | none (see note) | **320** — `16-layout-advanced` will show a far larger WMMA speedup here |
 | FP32 | ~2.8 TFLOP/s | ~8.1 TFLOP/s |
 | FP64 | 1/32 rate | 1/32 rate — same penalty |
 | Board power | 75 W | 70 W, passively cooled |
@@ -98,7 +98,7 @@ for f in ["01-quant-llm/quant_gemv.cu", "02-hash-table/hash_table.cu",
 Colab's sandbox may restrict process spawning — if it fails, that is the
 environment, not the code.
 
-## Step 5 — the full portfolio (14 projects, 185 tests)
+## Step 5 — the full portfolio (16 projects, 233 tests)
 
 ```python
 %cd /content/cuda-learnings/cuda-portfolio
@@ -115,10 +115,17 @@ A full build takes **5–10 minutes** on Colab's CPU allocation.
 %cd ..
 ```
 
-Expect `100% tests passed out of 15`. Every test is written against an
+Expect `100% tests passed out of 17`. Every test is written against an
 independent reference (CPU models, NIST vectors, closed-form Black-Scholes,
 brute-force k-NN, Dijkstra), so passing on different hardware is meaningful
 rather than tautological.
+
+**One result should differ sharply on a T4.** `16-layout-advanced` measures
+`wmma` against a tuned FP32 SGEMM and gets **2.45×** on a GTX 1650, which NVIDIA
+lists as having no Tensor Cores. The T4 has 320 of them. Run
+`./build/bin/bench_layout_advanced` and compare the three-kernel table — it is
+the clearest before/after in this repo, on identical source.
+
 
 Then run whichever benchmarks interest you:
 
