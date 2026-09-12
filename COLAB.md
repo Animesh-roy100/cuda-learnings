@@ -98,7 +98,7 @@ for f in ["01-quant-llm/quant_gemv.cu", "02-hash-table/hash_table.cu",
 Colab's sandbox may restrict process spawning — if it fails, that is the
 environment, not the code.
 
-## Step 5 — the full portfolio (16 projects, 251 tests)
+## Step 5 — the full portfolio (17 projects, 309 tests)
 
 ```python
 %cd /content/cuda-learnings/cuda-portfolio
@@ -115,7 +115,7 @@ A full build takes **5–10 minutes** on Colab's CPU allocation.
 %cd ..
 ```
 
-Expect `100% tests passed out of 18`. Every test is written against an
+Expect `100% tests passed out of 19`. Every test is written against an
 independent reference (CPU models, NIST vectors, closed-form Black-Scholes,
 brute-force k-NN, Dijkstra), so passing on different hardware is meaningful
 rather than tautological.
@@ -136,9 +136,10 @@ Then run whichever benchmarks interest you:
 !./build/bin/bench_sha256      # SHA-256 hashrate + register pressure
 !./build/bin/bench_warp_primitives   # every shuffle/vote/atomic/intrinsic
 !./build/bin/bench_layout_advanced   # AoS-vs-SoA, bank conflicts, WMMA, cg
+!./build/bin/bench_tc_gemm           # tensor-core GEMM vs cuBLAS, fp16 + int8
 ```
 
-All sixteen, if you want the full sweep (about 6 minutes):
+All seventeen, if you want the full sweep (about 7 minutes):
 
 ```python
 import subprocess, glob, os
@@ -266,7 +267,14 @@ On a T4 the third row should pull far further ahead while the middle row stays
 near 1.00×, because the operand width is not the bottleneck on either card. If
 you run one thing from this repo on Colab, run this and compare the two tables.
 
-The other four sections of that benchmark should be roughly **unchanged**: AoS
+`17-tc-gemm` should show the same thing at full scale. On the GTX 1650, cuBLAS
+FP16 is 4x *slower* than cuBLAS FP32 - evidence it does not use tensor cores for
+FP16 there - and every FP16 path loses to FP32. On a T4, cuBLAS FP16 with 16F
+compute should overtake FP32; if it does not, that is worth investigating. Note
+too that cuBLAS INT8 refused odd multiples of 16 on the 1650: run
+`./build/bin/test_tc_gemm` and look at which cases skip.
+
+The other four sections of the `16-layout-advanced` benchmark should be roughly **unchanged**: AoS
 vs SoA, bank-conflict padding and cooperative groups are architectural
 properties both cards share, and `cg::memcpy_async` stays at ~1.00× because the
 T4 is also `sm_75` and `cp.async` needs `sm_80`.

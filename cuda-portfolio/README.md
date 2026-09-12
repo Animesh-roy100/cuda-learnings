@@ -1,6 +1,6 @@
 # CUDA systems portfolio — GTX 1650 (Turing, `sm_75`)
 
-Sixteen production-structured CUDA projects. Every one builds, runs, and
+Seventeen production-structured CUDA projects. Every one builds, runs, and
 self-verifies against an independent reference. **Every number below was
 measured on this machine**, not estimated.
 
@@ -564,6 +564,95 @@ DRAM write straight into shared memory arrived with **Ampere, sm_80**. Here it
 falls back to the ordinary load. This is the cleanest example in the repo of the
 thing worth internalising: *the API being available is not the same as the
 hardware being there, and only the clock can tell the two apart.*
+
+## 17. Tensor-core GEMM, FP16 and INT8, against cuBLAS (`17-tc-gemm`)
+
+A from-scratch `C = A*B` built on WMMA fragments, measured against cuBLAS at
+N = 4096. Fourteen paths, arranged so each comparison changes one thing:
+
+| path | ms | GFLOPS | % of cuBLAS (same precision) |
+|---|---|---|---|
+| fp32 tiled, CUDA cores | 615.9 | 111.6 | 14.7% |
+| fp16 WMMA, from global | 241.8 | 284.2 | **156.6%** |
+| fp16 WMMA, staged (best band) | 242.1 | 283.8 | 156.4% |
+| int8 WMMA, from global | 110.9 | 619.8 | **12.8%** |
+| int8 WMMA, staged (best band) | 110.4 | 622.7 | 12.8% |
+| int8 `__dp4a`, CUDA cores | 785.7 | 87.5 | 1.8% |
+| cuBLAS sgemm | 90.4 | **760.2** | - |
+| cuBLAS fp16, 32F compute | 406.4 | 169.1 | - |
+| cuBLAS fp16, 16F compute | 378.8 | 181.4 | - |
+| cuBLAS int8 | 14.2 | **4854.5** | - |
+
+Every path is checked against an FP64 host product, not against cuBLAS: a
+reference computed by one of the things under test cannot catch a bug they share.
+
+**INT8 is where tensor cores work on this card.** Tensor-core INT8 is **7.09x**
+`__dp4a` on identical operands - the same instruction project 01's GEMV is built
+on, doing the same multiply-adds in CUDA cores. cuBLAS INT8 is 6.4x cuBLAS FP32.
+The hand-written INT8 path reaches 12.8% of cuBLAS; what the remaining gap is made
+of needs an Nsight Compute roofline, which on this machine needs elevation, so it
+is stated as unexplained rather than guessed at.
+
+**FP16 does not pay here at all.** The hand-written FP16 path beats cuBLAS's FP16
+by 1.57x - but cuBLAS FP32 beats *every* FP16 path, including cuBLAS's own, by
+2.7-4.5x. cuBLAS evidently does not route FP16 to tensor cores on this chip. That
+is the single result most likely to change on a T4.
+
+### Staging lost, and the reason was not the one in the comment
+
+The textbook tiled design stages each band of operands into shared memory so
+fragments load from L1. The first version lost to loading straight from DRAM -
+**0.62x for fp16, 0.46x for int8** - and the kernel's own comment blamed bank
+conflicts: fp16 packs two elements per 4-byte bank word, int8 packs four.
+
+A word-aligned control that removes the conflicts won back **1.27-1.34x**. Real,
+but it still lost. Asking the occupancy API explained the rest:
+
+| kernel (band 512) | blocks / SM | compute warps / SM |
+|---|---|---|
+| fp16 WMMA from global | 8 | **32** |
+| fp16 WMMA staged | 2 | **2** |
+
+The 32 KB staging arrays let only two blocks fit per SM. The staged kernel had
+been running with a sixteenth of the warps - and still reached 0.6-0.8x, so per
+warp it was far more efficient. The band width is a compile-time parameter
+(it sizes `__shared__` arrays), so every width was compiled and swept:
+
+| band | fp16 by element | int8 by word | compute warps |
+|---|---|---|---|
+| 16 | 0.49x | 0.31x | 16 |
+| 64 | 0.92x | 0.80x | 16 |
+| **128** | **0.98x** | **0.99x** | 8-16 |
+| 256 | 0.93x | 0.81x | 4-8 |
+| 512 | 0.60x | 0.93x | 2-4 |
+
+(Relative to loading from global, N = 2048.) Narrow bands do too little work per
+barrier; wide ones evict warps. **At the best band, staging ties loading from
+global and never beats it** - and it cannot, because a one-warp-per-block design
+caps at 16 resident warps per SM where the global kernel, four warps per block,
+gets 32. On this card, WMMA fragment loads straight from DRAM are as good as any
+staging scheme.
+
+Software pipelining - a second warp staging the next band while the first
+multiplies - reached **0.99x fp16 / 0.83x int8**. It is the sm_75 substitute for
+`cp.async`, which on sm_80 lets DRAM write into shared memory while the warp keeps
+computing; here the overlap costs a second buffer, and the buffer costs occupancy.
+
+### Measured constraints
+
+- **cuBLAS INT8 refuses odd multiples of 16.** `GemmEx` with int8 operands accepts
+  N = 16 and every multiple of 32, and returns `CUBLAS_STATUS_NOT_SUPPORTED` for
+  48, 80, 112, ... 496 - although the documented requirement is only multiples of
+  4. The hand-written INT8 paths accept every multiple of 16; the refusal is
+  surfaced as a typed `tc::Unsupported`, not a generic failure.
+- **The shared-memory limit per kernel is 48 KB.** The device linker rejected the
+  fp16 pipelined kernel at band 512 ("0xc000 max") - not the 64 KB figure the
+  first comment assumed. Instantiations over budget are excluded at compile time.
+- **Every launch is kept under the Windows display-driver timeout.** One tiled
+  FP32 product at N = 4096 takes 616 ms; a single launch running past ~2 s resets
+  the GPU. The hand-written paths launch in bands of 16 tile rows.
+- **The experimental 4-bit fragment (`u4`, 8x8x32) is exact** on a host-checked
+  matrix - kept as a correctness check on a type deprecated after Turing.
 
 ## Error paths (`error-paths`)
 
