@@ -26,7 +26,7 @@ called out rather than quietly dropped.
 ```
 cuda-learning/     fundamentals — grid/block model, memory hierarchy, tiling
 cuda-projects/     five standalone programs, one file each
-cuda-portfolio/    eight production-structured systems: CMake, tests, profiling
+cuda-portfolio/    thirteen production-structured systems: CMake, tests, profiling
 cuda.code-workspace   opens all three in VS Code
 ```
 
@@ -49,7 +49,7 @@ indexing with DBSCAN, a zero-copy/CUDA-IPC pipeline, and Monte Carlo pricing.
 
 ### `cuda-portfolio/` — production structure
 
-Eight systems with modern CMake, GoogleTest suites, and profiling scripts.
+Thirteen systems with modern CMake, GoogleTest suites, and profiling scripts.
 Public headers contain **no CUDA syntax** (pimpl), so tests and host code
 compile as plain C++20 and only `.cu` files need nvcc.
 
@@ -61,7 +61,7 @@ cd build && ctest --output-on-failure
 ```
 
 ```
-100% tests passed out of 9 suites      (110 test cases)
+100% tests passed out of 14 suites     (169 test cases)
 ```
 
 | # | Project | Headline result |
@@ -74,12 +74,17 @@ cd build && ctest --output-on-failure
 | 6 | Audio STFT + phase vocoder | 512 channels at **37,287× real time** |
 | 7 | Monte Carlo pricing & risk | 9,967 M paths/s, **0.09σ** from Black-Scholes |
 | 8 | Graph engine (PageRank/SSSP) | warp-per-node **3.2×** thread-per-node |
+| 9 | Vector ANN search (IVF-Flat) | 100% recall at nprobe=128; coalescing fix worth **2.14×** |
+| 10 | DPI packet matching | **14 Gbit/s** against 1024 Aho-Corasick signatures |
+| 11 | Optical flow (KLT) | 1080p Harris **2346 fps**, tracking error **0.008 px** |
+| 12 | SHA-256 proof of work | **1.26 GH/s**, ~72% of integer peak, zero register spill |
+| 13 | SpMV + conjugate gradient | 4 formats; hybrid uses **23 MB where ELLPACK needs 3.8 GB** |
 
 Each project's README documents its own measurements in detail.
 
-## Four "obvious" optimizations that lost when measured
+## Six "obvious" optimizations that lost when measured
 
-Every one of these is standard advice. All four were slower here:
+Every one of these is standard advice. All six were slower here:
 
 - **Warp-cooperative hash probing** — 0.52× at load factor 0.5. It spends a
   256-byte transaction per query when the average probe chain is 1.5 slots.
@@ -94,12 +99,18 @@ Every one of these is standard advice. All four were slower here:
   reduction.
 - **Zero-copy transfer** — loses to `cudaMemcpy`, which streams one full-width
   DMA burst instead of fine-grained PCIe reads.
+- **Zero-copy for packet inspection** — 7× slower. The automaton walks bytes
+  serially with data-dependent transitions, so mapped memory pays PCIe latency
+  per byte and nothing coalesces.
+- **Warp-per-row SpMV** — the *slowest* of four formats on matrices with
+  uniform short rows, because 31 of 32 lanes sit idle. It is the second
+  fastest on a skewed matrix. Same kernel, opposite verdict.
 
 Also: **push PageRank beat pull**, the opposite of the usual guidance. The skew
 decides it — this graph has uniform out-degrees and power-law in-degrees, so
 put the parallelism on the side that *isn't* skewed.
 
-## Three real bugs, and what they teach
+## Real bugs, and what they teach
 
 - **Shared-memory race in a block reduction** (Monte Carlo). One `__shared__`
   array reused across five consecutive calls with no barrier at entry. Warps
@@ -114,12 +125,25 @@ put the parallelism on the side that *isn't* skewed.
 - **Buffer sized from the wrong variable** (phase vocoder). The overlap-add
   length depends on the stretch ratio, not the input length. Hard failure at
   ratio 2.0.
+- **Silent truncation** (ANN index). Probe selection used a 32-entry register
+  top-k, so any `nprobe > 32` was quietly ignored. Recall plateaued at 80% with
+  no error raised anywhere — the worst kind of bug, because nothing looks wrong.
+- **Two meanings in one array** (optical flow). The KLT kernel used one array as
+  both the template anchor in frame A and the moving estimate in frame B. Once a
+  coarse pyramid level refined the position, finer levels sampled the template
+  at the wrong place, so the pyramid made tracking **worse**: 33 px error at four
+  levels versus 12.5 px at one.
+- **Three wrong ways to report a hashrate** (SHA-256) and **two wrong ways to
+  count SpMV bandwidth**. Both produced figures that exceeded what the hardware
+  can physically do — above the raw kernel's rate, and 115% of peak memory
+  bandwidth. An impossible number is the most reliable signal available that the
+  measurement, not the code, is broken.
 
 ## Method notes
 
-1. **Decide memory-bound vs compute-bound before optimising.** Seven of these
-   eight are memory bound; only Monte Carlo is compute bound. The right move is
-   opposite in each case.
+1. **Decide memory-bound vs compute-bound before optimising.** Eleven of these
+   thirteen are memory bound; Monte Carlo and SHA-256 are compute bound. The
+   right move is opposite in each case.
 2. **Warm up before timing.** An un-warmed first launch made one GEMV read
    31 GB/s instead of 147, and made zero-copy look faster than VRAM — which is
    physically impossible.

@@ -1,6 +1,6 @@
 # CUDA systems portfolio — GTX 1650 (Turing, `sm_75`)
 
-Eight production-structured CUDA projects. Every one builds, runs, and
+Thirteen production-structured CUDA projects. Every one builds, runs, and
 self-verifies against an independent reference. **Every number below was
 measured on this machine**, not estimated.
 
@@ -22,7 +22,7 @@ cd build && ctest --output-on-failure
 ```
 
 ```
-100% tests passed out of 9        (110 test cases across 8 projects)
+100% tests passed out of 14       (169 test cases across 13 projects)
 ```
 
 | Suite | Cases | | Suite | Cases |
@@ -269,6 +269,103 @@ SSSP verified against a CPU Dijkstra; grid distances verified against Manhattan
 distance exactly.
 
 ---
+
+## 9. Vector ANN search (`09-vector-ann`)
+
+IVF-Flat: k-means partitioning, warp-cooperative distance kernels,
+register-resident top-k. 200k x 768-dim vectors (614 MB).
+
+Recall/latency curve, k=10, 1024 queries:
+
+| nprobe | recall | queries/s | speedup vs exhaustive |
+|---|---|---|---|
+| 1 | 14.5% | 3610 | 23.9x |
+| 16 | 68.4% | 437 | 2.9x |
+| 64 | 92.2% | 240 | 1.6x |
+| 128 | **100%** | 201 | 1.3x |
+
+**The biggest win was coalescing**, measured both ways: one lane per candidate
+gives 43.4 GB/s (23% of peak); having the whole warp cooperate on one row gives
+**92.9 GB/s (48% of peak), 2.14x**. At 768 dims a row is 3072 bytes, so
+lane-per-candidate puts neighbouring lanes 3072 bytes apart and every load
+becomes its own transaction.
+
+**Bug caught:** probe selection used a register top-k capped at 32, so any
+`nprobe > 32` was silently truncated. Recall plateaued at 80% with no error
+reported anywhere.
+
+## 10. DPI packet matching (`10-dpi-matching`)
+
+Aho-Corasick with a dense 256-way goto table, `atomicOr` bitmask reporting,
+`__ldg()` for the transition table. **14 Gbit/s** against 1024 signatures.
+
+**Honest result:** zero-copy is **7x slower** here, contrary to the usual advice
+for capture rings. The automaton walks bytes serially with data-dependent
+transitions, so mapped memory pays PCIe latency per byte and nothing coalesces.
+Zero-copy suits bulk coalesced streaming, not pointer-chasing.
+
+At 1.75 GB/s this sits near 1% of peak, and the benchmark says exactly why:
+uncoalesced payload reads (thread *p* reads packet *p*, so byte *i* of adjacent
+packets is ~1 MTU apart) and an 8.3 MB goto table that will not fit 1 MB of L2.
+
+## 11. Optical flow / KLT (`11-optical-flow`)
+
+Harris corners with shared-memory halo tiles, Gaussian pyramids, iterative
+Lucas-Kanade with an explicit 2x2 inverse.
+
+1080p: Harris **0.43 ms (2346 fps)**, tracking **1.7-4.7 ms**, mean error
+**0.008 px**. Comfortably past the 120 fps target.
+
+**Bug caught:** the kernel used one array as both the template anchor in frame A
+and the moving estimate in frame B. Once a coarse level refined the position,
+finer levels sampled the template at the wrong place — so the pyramid actively
+made things **worse** (33 px error at 4 levels vs 12.5 px at one). Separating
+the two arrays fixed it.
+
+## 12. SHA-256 / proof of work (`12-crypto-hash`)
+
+Fully unrolled rounds, rolling 16-word message schedule, `__constant__` round
+constants, `__funnelshift_r` rotations. Validated against the FIPS 180-4
+vectors, and mined nonces are re-verified on the host.
+
+**1.26 GH/s — about 72% of integer peak.** Verified zero spill:
+
+```
+ptxas: 45 registers, 0 bytes spill stores, 0 bytes spill loads   (hashrate)
+ptxas: 54 registers, 0 bytes spill stores, 0 bytes spill loads   (mine)
+ptxas: 46 registers, 0 bytes spill stores, 0 bytes spill loads   (hash_batch)
+```
+
+**Reports no mining hashrate, deliberately.** Charging the full budget ignores
+the early exit and gave rates *above* the raw kernel — impossible. Estimating
+from the winning nonce is also wrong: the launch has far more blocks than fit on
+14 SMs, so blocks run in waves and the later ones never execute when an early
+block wins. An honest count needs an atomic in the inner loop, which would slow
+the thing being measured. Time-to-solution is reported instead.
+
+## 13. SpMV and conjugate gradient (`13-spmv`)
+
+Four formats — CSR scalar, CSR vector, ELLPACK (column-major), and a hybrid
+ELL+CSR split at the 90th percentile row length.
+
+| Matrix | Best format | GFLOP/s | A-stream |
+|---|---|---|---|
+| banded, 4.5M nnz | Hybrid | 35.3 | 149 GB/s (78% peak) |
+| power-law, 1.8M nnz | Hybrid | 7.5 | 37 GB/s |
+| 2D Laplacian, 2.4M nnz | ELLPACK | 30.4 | 134 GB/s (70% peak) |
+
+**No format wins everywhere, which is the whole point.** CSR vector is the
+*slowest* option on banded and Laplacian matrices (31 of 32 lanes idle on rows
+of length 5) and the second fastest on the skewed one. Same kernel, opposite
+verdict, decided entirely by the row-length distribution.
+
+ELLPACK on the power-law matrix needs **260x the real non-zeros — 3.84 GB**,
+more than this card can sensibly allocate, so the benchmark refuses to run it.
+Hybrid does the same work in 23 MB.
+
+Dot products accumulate in **double**: CG compares residuals shrinking by orders
+of magnitude, and FP32 accumulation destroys exactly the digits the stopping
+test depends on. The SpMV stays FP32; only the reduction needs the precision.
 
 ## Cross-cutting lessons
 
