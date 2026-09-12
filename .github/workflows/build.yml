@@ -63,10 +63,28 @@ jobs:
 
       - name: Build
         working-directory: cuda-portfolio
+        shell: bash
         # Thrust-heavy translation units need several GB each under nvcc, and a
         # hosted runner has 16 GB. Full parallelism has been known to OOM-kill
         # the compiler with no useful message.
-        run: cmake --build build -j 2
+        #
+        # -k 0 keeps building past the first failure so one run reports every
+        # broken translation unit, and the distinct compiler errors are raised
+        # as annotations: those are readable on the commit page without the
+        # repository-admin access that downloading a job log requires.
+        run: |
+          set -o pipefail
+          status=0
+          cmake --build build -j 2 -- -k 0 2>&1 | tee build.log || status=$?
+          if [ "$status" -ne 0 ]; then
+            grep -E "(error|Error)[: ]" build.log \
+              | grep -v "^ninja: build stopped" \
+              | sed -E 's#^.*/cuda-portfolio/##' \
+              | awk '!seen[$0]++' \
+              | head -10 \
+              | while IFS= read -r line; do echo "::error::$line"; done
+          fi
+          exit $status
 
       # Through the repo's own build.sh scripts, not a copy of their flags, so
       # the scripts COLAB.md tells people to run are what gets checked.
