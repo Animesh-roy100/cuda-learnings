@@ -1,0 +1,10 @@
+build/
+.vs/
+*.user
+
+# nsys timelines ARE kept: they are the profiling evidence and are small.
+# ncu CSVs are not -- they are machine-specific and, until GPU counter access
+# is granted, contain nothing but ERR_NVGPUCTRPERM.
+profiles/*_ncu.csv
+profiles/*.ncu-rep
+profiles/*.sqlite

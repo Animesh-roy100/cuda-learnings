@@ -1,0 +1,106 @@
+{
+  "folders": [
+    {
+      "name": "1. Learning (start here)",
+      "path": "cuda-learning"
+    },
+    {
+      "name": "2. Standalone projects",
+      "path": "cuda-projects"
+    },
+    {
+      "name": "3. Portfolio (CMake + tests)",
+      "path": "cuda-portfolio"
+    }
+  ],
+  "settings": {
+    "files.associations": {
+      "*.cu": "cuda-cpp",
+      "*.cuh": "cuda-cpp"
+    },
+    // Build artifacts and fetched dependencies: noise in search, and this tree
+    // lives under OneDrive so excluding them also keeps the sync sane.
+    "files.exclude": {
+      "**/build": true,
+      "**/bin": true
+    },
+    "search.exclude": {
+      "**/build": true,
+      "**/bin": true,
+      "**/profiles": true
+    },
+    "files.watcherExclude": {
+      "**/build/**": true,
+      "**/bin/**": true
+    },
+    "C_Cpp.default.cppStandard": "c++20",
+    "C_Cpp.default.includePath": [
+      "${workspaceFolder:3. Portfolio (CMake + tests)}/common/include",
+      "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.4/include"
+    ],
+    "C_Cpp.default.defines": ["__CUDACC__"],
+    "cmake.sourceDirectory": "${workspaceFolder:3. Portfolio (CMake + tests)}",
+    "cmake.buildDirectory": "${workspaceFolder:3. Portfolio (CMake + tests)}/build",
+    "cmake.configureArgs": ["-DCMAKE_BUILD_TYPE=Release"],
+    "cmake.generator": "Ninja"
+  },
+  "tasks": {
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "portfolio: configure",
+        "type": "shell",
+        "command": "cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release",
+        "options": {
+          "cwd": "${workspaceFolder:3. Portfolio (CMake + tests)}"
+        },
+        "problemMatcher": []
+      },
+      {
+        "label": "portfolio: build",
+        "type": "shell",
+        "command": "cmake --build build",
+        "options": {
+          "cwd": "${workspaceFolder:3. Portfolio (CMake + tests)}"
+        },
+        "group": { "kind": "build", "isDefault": true },
+        "problemMatcher": ["$msCompile"]
+      },
+      {
+        "label": "portfolio: test",
+        "type": "shell",
+        "command": "ctest --output-on-failure",
+        "options": {
+          "cwd": "${workspaceFolder:3. Portfolio (CMake + tests)}/build"
+        },
+        "group": { "kind": "test", "isDefault": true },
+        "problemMatcher": []
+      },
+      {
+        "label": "portfolio: profile (nsys only)",
+        "type": "shell",
+        "command": "powershell -ExecutionPolicy Bypass -File ./scripts/profile.ps1 -SkipNcu",
+        "options": {
+          "cwd": "${workspaceFolder:3. Portfolio (CMake + tests)}"
+        },
+        "problemMatcher": []
+      },
+      {
+        "label": "learning: build current file",
+        "type": "shell",
+        "command": "build.bat \"${relativeFileDirname}/${fileBasename}\"",
+        "options": {
+          "cwd": "${workspaceFolder:1. Learning (start here)}"
+        },
+        "problemMatcher": ["$msCompile"]
+      }
+    ]
+  },
+  "extensions": {
+    "recommendations": [
+      "ms-vscode.cpptools-extension-pack",
+      "ms-vscode.cmake-tools",
+      "nvidia.nsight-vscode-edition"
+    ]
+  }
+}
