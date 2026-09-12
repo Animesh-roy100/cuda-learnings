@@ -265,49 +265,58 @@ struct GraphEngine::Impl {
     float *d_a = nullptr, *d_b = nullptr;
     double* d_scalar = nullptr;
     int* d_flag = nullptr;
+
+    // Owns every resource, so a constructor that throws partway through
+    // releases what it had already acquired. A class destructor never runs
+    // for an object whose constructor threw. Every release is null-safe.
+    ~Impl() {
+        cudaFree(d_out_off); cudaFree(d_out_idx);
+        cudaFree(d_in_off); cudaFree(d_in_idx);
+        cudaFree(d_out_deg); cudaFree(d_w);
+        cudaFree(d_a); cudaFree(d_b);
+        cudaFree(d_scalar); cudaFree(d_flag);
+    }
 };
 
 GraphEngine::GraphEngine(const CsrGraph& g) : impl_(new Impl) {
-    impl_->n = g.num_nodes();
-    impl_->m = g.num_edges();
-    impl_->weighted = !g.weights.empty();
-    const i32 n = impl_->n;
+    try {
+        impl_->n = g.num_nodes();
+        impl_->m = g.num_edges();
+        impl_->weighted = !g.weights.empty();
+        const i32 n = impl_->n;
 
-    CsrGraph t = g.transpose();
-    std::vector<i32> out_deg(n);
-    for (i32 v = 0; v < n; ++v) out_deg[v] = g.row_offsets[v + 1] - g.row_offsets[v];
+        CsrGraph t = g.transpose();
+        std::vector<i32> out_deg(n);
+        for (i32 v = 0; v < n; ++v) out_deg[v] = g.row_offsets[v + 1] - g.row_offsets[v];
 
-    auto up_i32 = [](i32** d, const std::vector<i32>& h) {
-        CU_CHECK(cudaMalloc(d, sizeof(i32) * std::max<std::size_t>(h.size(), 1)));
-        if (!h.empty())
-            CU_CHECK(cudaMemcpy(*d, h.data(), sizeof(i32) * h.size(), cudaMemcpyHostToDevice));
-    };
-    up_i32(&impl_->d_out_off, g.row_offsets);
-    up_i32(&impl_->d_out_idx, g.col_indices);
-    up_i32(&impl_->d_in_off, t.row_offsets);
-    up_i32(&impl_->d_in_idx, t.col_indices);
-    up_i32(&impl_->d_out_deg, out_deg);
+        auto up_i32 = [](i32** d, const std::vector<i32>& h) {
+            CU_CHECK(cudaMalloc(d, sizeof(i32) * std::max<std::size_t>(h.size(), 1)));
+            if (!h.empty())
+                CU_CHECK(cudaMemcpy(*d, h.data(), sizeof(i32) * h.size(), cudaMemcpyHostToDevice));
+        };
+        up_i32(&impl_->d_out_off, g.row_offsets);
+        up_i32(&impl_->d_out_idx, g.col_indices);
+        up_i32(&impl_->d_in_off, t.row_offsets);
+        up_i32(&impl_->d_in_idx, t.col_indices);
+        up_i32(&impl_->d_out_deg, out_deg);
 
-    if (impl_->weighted) {
-        CU_CHECK(cudaMalloc(&impl_->d_w, sizeof(float) * g.weights.size()));
-        CU_CHECK(cudaMemcpy(impl_->d_w, g.weights.data(), sizeof(float) * g.weights.size(),
-                            cudaMemcpyHostToDevice));
+        if (impl_->weighted) {
+            CU_CHECK(cudaMalloc(&impl_->d_w, sizeof(float) * g.weights.size()));
+            CU_CHECK(cudaMemcpy(impl_->d_w, g.weights.data(), sizeof(float) * g.weights.size(),
+                                cudaMemcpyHostToDevice));
+        }
+        CU_CHECK(cudaMalloc(&impl_->d_a, sizeof(float) * std::max(n, 1)));
+        CU_CHECK(cudaMalloc(&impl_->d_b, sizeof(float) * std::max(n, 1)));
+        CU_CHECK(cudaMalloc(&impl_->d_scalar, sizeof(double)));
+        CU_CHECK(cudaMalloc(&impl_->d_flag, sizeof(int)));
+    } catch (...) {
+        delete impl_;   // releases anything acquired before the throw
+        impl_ = nullptr;
+        throw;
     }
-    CU_CHECK(cudaMalloc(&impl_->d_a, sizeof(float) * std::max(n, 1)));
-    CU_CHECK(cudaMalloc(&impl_->d_b, sizeof(float) * std::max(n, 1)));
-    CU_CHECK(cudaMalloc(&impl_->d_scalar, sizeof(double)));
-    CU_CHECK(cudaMalloc(&impl_->d_flag, sizeof(int)));
 }
 
-GraphEngine::~GraphEngine() {
-    if (!impl_) return;
-    cudaFree(impl_->d_out_off); cudaFree(impl_->d_out_idx);
-    cudaFree(impl_->d_in_off); cudaFree(impl_->d_in_idx);
-    cudaFree(impl_->d_out_deg); cudaFree(impl_->d_w);
-    cudaFree(impl_->d_a); cudaFree(impl_->d_b);
-    cudaFree(impl_->d_scalar); cudaFree(impl_->d_flag);
-    delete impl_;
-}
+GraphEngine::~GraphEngine() { delete impl_; }
 
 PageRankResult GraphEngine::pagerank(float damping, int max_iter, float tol,
                                      Direction dir, Balance balance) {

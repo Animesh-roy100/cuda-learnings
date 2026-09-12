@@ -66,10 +66,16 @@ struct DynamicBatcher::Impl {
 
 DynamicBatcher::DynamicBatcher(int max_batch, int max_delay_us, Handler on_batch)
     : impl_(new Impl) {
-    impl_->max_batch = max_batch < 1 ? 1 : max_batch;
-    impl_->max_delay = std::chrono::microseconds(max_delay_us < 1 ? 1 : max_delay_us);
-    impl_->handler = std::move(on_batch);
-    impl_->worker = std::thread([this] { impl_->run(); });
+    try {
+        impl_->max_batch = max_batch < 1 ? 1 : max_batch;
+        impl_->max_delay = std::chrono::microseconds(max_delay_us < 1 ? 1 : max_delay_us);
+        impl_->handler = std::move(on_batch);
+        impl_->worker = std::thread([this] { impl_->run(); });
+    } catch (...) {
+        delete impl_;   // releases anything acquired before the throw
+        impl_ = nullptr;
+        throw;
+    }
 }
 
 DynamicBatcher::~DynamicBatcher() {

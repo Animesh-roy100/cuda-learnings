@@ -8,6 +8,7 @@
 
 #include <cuda_runtime.h>
 
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -57,31 +58,52 @@ struct PagedKvCache::Impl {
         if (l < 0 || l >= cfg.n_layers)
             throw std::out_of_range("PagedKvCache: invalid layer " + std::to_string(l));
     }
+
+    // Owns every resource, so a constructor that throws partway through
+    // releases what it had already acquired. A class destructor never runs
+    // for an object whose constructor threw. Every release is null-safe.
+    ~Impl() {
+        cudaFree(slab);
+    }
 };
 
 PagedKvCache::PagedKvCache(const KvCacheConfig& cfg) : impl_(new Impl) {
-    if (cfg.n_layers <= 0 || cfg.n_kv_heads <= 0 || cfg.head_dim <= 0 ||
-        cfg.page_tokens <= 0 || cfg.total_pages <= 0)
-        throw std::invalid_argument("PagedKvCache: all config fields must be positive");
+    try {
+        if (cfg.n_layers <= 0 || cfg.n_kv_heads <= 0 || cfg.head_dim <= 0 ||
+            cfg.page_tokens <= 0 || cfg.total_pages <= 0)
+            throw std::invalid_argument("PagedKvCache: all config fields must be positive");
 
-    impl_->cfg = cfg;
-    impl_->vals_per_token = static_cast<std::size_t>(cfg.n_kv_heads) * cfg.head_dim;
-    impl_->floats_per_page = static_cast<std::size_t>(cfg.page_tokens) * impl_->vals_per_token * 2;
+        // Every factor is a positive int, but their product is not bounded by
+        // anything. Unchecked, a large enough configuration wraps size_t -- to
+        // exactly zero for 65536 heads x 65536 dims x 65536 tokens x 8192
+        // pages -- and cudaMalloc(&p, 0) SUCCEEDS with a null slab.
+        const std::size_t limit = std::numeric_limits<std::size_t>::max();
+        auto mul = [&](std::size_t a, std::size_t b) {
+            if (b != 0 && a > limit / b)
+                throw std::invalid_argument("PagedKvCache: configuration size overflows");
+            return a * b;
+        };
+        const std::size_t vals = mul(cfg.n_kv_heads, cfg.head_dim);
+        const std::size_t fpp = mul(mul(cfg.page_tokens, vals), 2);
+        const std::size_t bytes = mul(mul(fpp, cfg.total_pages), sizeof(float));
 
-    CU_CHECK(cudaMalloc(&impl_->slab,
-                        impl_->floats_per_page * cfg.total_pages * sizeof(float)));
+        impl_->cfg = cfg;
+        impl_->vals_per_token = vals;
+        impl_->floats_per_page = fpp;
 
-    impl_->free_list.reserve(cfg.total_pages);
-    // Hand out low page ids first, so tests see deterministic ids.
-    for (int p = cfg.total_pages - 1; p >= 0; --p) impl_->free_list.push_back(p);
-}
+        CU_CHECK(cudaMalloc(&impl_->slab, bytes));
 
-PagedKvCache::~PagedKvCache() {
-    if (impl_) {
-        cudaFree(impl_->slab);
-        delete impl_;
+        impl_->free_list.reserve(cfg.total_pages);
+        // Hand out low page ids first, so tests see deterministic ids.
+        for (int p = cfg.total_pages - 1; p >= 0; --p) impl_->free_list.push_back(p);
+    } catch (...) {
+        delete impl_;   // releases anything acquired before the throw
+        impl_ = nullptr;
+        throw;
     }
 }
+
+PagedKvCache::~PagedKvCache() { delete impl_; }
 
 int PagedKvCache::create_sequence() {
     Impl::Seq s;

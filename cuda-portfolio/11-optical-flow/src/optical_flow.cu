@@ -208,27 +208,36 @@ struct FlowTracker::Impl {
     int w = 0, h = 0;
     unsigned char *d_a = nullptr, *d_b = nullptr;
     float *d_gx = nullptr, *d_gy = nullptr, *d_resp = nullptr;
+
+    // Owns every resource, so a constructor that throws partway through
+    // releases what it had already acquired. A class destructor never runs
+    // for an object whose constructor threw. Every release is null-safe.
+    ~Impl() {
+        cudaFree(d_a); cudaFree(d_b);
+        cudaFree(d_gx); cudaFree(d_gy); cudaFree(d_resp);
+    }
 };
 
 FlowTracker::FlowTracker(int width, int height) : impl_(new Impl) {
-    if (width < 16 || height < 16)
-        throw std::invalid_argument("frame must be at least 16x16");
-    impl_->w = width;
-    impl_->h = height;
-    const size_t n = (size_t)width * height;
-    CU_CHECK(cudaMalloc(&impl_->d_a, n));
-    CU_CHECK(cudaMalloc(&impl_->d_b, n));
-    CU_CHECK(cudaMalloc(&impl_->d_gx, n * sizeof(float)));
-    CU_CHECK(cudaMalloc(&impl_->d_gy, n * sizeof(float)));
-    CU_CHECK(cudaMalloc(&impl_->d_resp, n * sizeof(float)));
+    try {
+        if (width < 16 || height < 16)
+            throw std::invalid_argument("frame must be at least 16x16");
+        impl_->w = width;
+        impl_->h = height;
+        const size_t n = (size_t)width * height;
+        CU_CHECK(cudaMalloc(&impl_->d_a, n));
+        CU_CHECK(cudaMalloc(&impl_->d_b, n));
+        CU_CHECK(cudaMalloc(&impl_->d_gx, n * sizeof(float)));
+        CU_CHECK(cudaMalloc(&impl_->d_gy, n * sizeof(float)));
+        CU_CHECK(cudaMalloc(&impl_->d_resp, n * sizeof(float)));
+    } catch (...) {
+        delete impl_;   // releases anything acquired before the throw
+        impl_ = nullptr;
+        throw;
+    }
 }
 
-FlowTracker::~FlowTracker() {
-    if (!impl_) return;
-    cudaFree(impl_->d_a); cudaFree(impl_->d_b);
-    cudaFree(impl_->d_gx); cudaFree(impl_->d_gy); cudaFree(impl_->d_resp);
-    delete impl_;
-}
+FlowTracker::~FlowTracker() { delete impl_; }
 
 int FlowTracker::width() const { return impl_->w; }
 int FlowTracker::height() const { return impl_->h; }

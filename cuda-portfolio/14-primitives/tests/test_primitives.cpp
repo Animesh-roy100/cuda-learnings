@@ -95,10 +95,11 @@ TEST(UnifiedMemory, ExplicitCopyIsAlwaysAvailable) {
 // Availability of BOTH tuning modes must track the device attribute exactly.
 //
 // This matters more than it looks. cudaMemAdvise and cudaMemPrefetchAsync both
-// return cudaErrorInvalidDevice without concurrentManagedAccess, and that error
-// is sticky: it poisons the CUDA context so every later kernel launch in the
-// process fails too. Attempting them "just to see" takes down unrelated tests,
-// which is exactly what happened before this gate existed.
+// return cudaErrorInvalidDevice without concurrentManagedAccess. Before this
+// gate existed, attempting them took down unrelated tests -- not because the
+// context was poisoned (it was not; error-paths/ measures that directly) but
+// because CU_CHECK threw without consuming the recorded error, and the next
+// test's kernel check read it and blamed its own kernel.
 TEST(UnifiedMemory, TuningModesSkippedExactlyWhenUnsupported) {
     const auto caps = prim::query_managed_caps();
     auto results = prim::compare_memory_modes(1 << 18, 2);
@@ -122,11 +123,12 @@ TEST(UnifiedMemory, TuningModesSkippedExactlyWhenUnsupported) {
 }
 
 // The context must still be usable after compare_memory_modes() runs, which is
-// the real regression guard: a sticky error here would break everything after.
+// the regression guard: a failure left recorded here would be misreported by
+// whatever kernel check runs next.
 TEST(UnifiedMemory, LeavesTheContextUsable) {
     prim::compare_memory_modes(1 << 18, 2);
     auto r = prim::compare_graph_vs_stream(4, 10, 1024);
-    EXPECT_TRUE(r.results_match) << "context was poisoned by the memory-mode sweep";
+    EXPECT_TRUE(r.results_match) << "the memory-mode sweep left a CUDA error behind";
 }
 
 TEST(UnifiedMemory, RejectsBadArguments) {

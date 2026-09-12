@@ -189,8 +189,13 @@ struct StftProcessor::Impl {
     // it grows on demand instead.
     void ensure_out(size_t floats) {
         if (out_cap >= floats) return;
-        if (d_out) cudaFree(d_out);
-        if (d_wsum) cudaFree(d_wsum);
+        // Null both and zero the capacity before re-allocating: if either
+        // cudaMalloc fails, ~Impl must not free the old pointers a second time.
+        cudaFree(d_out);
+        cudaFree(d_wsum);
+        d_out = nullptr;
+        d_wsum = nullptr;
+        out_cap = 0;
         CU_CHECK(cudaMalloc(&d_out, floats * sizeof(float)));
         CU_CHECK(cudaMalloc(&d_wsum, floats * sizeof(float)));
         out_cap = floats;
@@ -218,57 +223,66 @@ struct StftProcessor::Impl {
                                   nullptr, 1, cfg.frame_size, CUFFT_C2R, batch), "plan C2R");
         plan_batch = batch;
     }
+
+    // Owns every resource, so a constructor that throws partway through
+    // releases what it had already acquired. A class destructor never runs
+    // for an object whose constructor threw. Every release is null-safe.
+    ~Impl() {
+        if (plan_fwd) cufftDestroy(plan_fwd);
+        if (plan_inv) cufftDestroy(plan_inv);
+        cudaFree(d_pcm);
+        cudaFree(d_frames);
+        cudaFree(d_spec);
+        cudaFree(d_spec2);
+        cudaFree(d_out);
+        cudaFree(d_wsum);
+        cudaFree(d_resampled);
+        cudaFree(d_win);
+        cudaFree(d_lastphase);
+        cudaFree(d_sumphase);
+    }
 };
 
 StftProcessor::StftProcessor(const StftConfig& cfg, int max_channels, int max_samples)
     : impl_(new Impl) {
-    if (cfg.frame_size <= 0 || (cfg.frame_size & (cfg.frame_size - 1)) != 0)
-        throw std::invalid_argument("frame_size must be a power of two");
-    if (cfg.hop <= 0 || cfg.hop > cfg.frame_size)
-        throw std::invalid_argument("hop must be in (0, frame_size]");
-    if (max_channels <= 0 || max_samples <= 0)
-        throw std::invalid_argument("max_channels and max_samples must be positive");
+    try {
+        if (cfg.frame_size <= 0 || (cfg.frame_size & (cfg.frame_size - 1)) != 0)
+            throw std::invalid_argument("frame_size must be a power of two");
+        if (cfg.hop <= 0 || cfg.hop > cfg.frame_size)
+            throw std::invalid_argument("hop must be in (0, frame_size]");
+        if (max_channels <= 0 || max_samples <= 0)
+            throw std::invalid_argument("max_channels and max_samples must be positive");
 
-    impl_->cfg = cfg;
-    impl_->max_channels = max_channels;
-    impl_->max_samples = max_samples;
-    impl_->bins = cfg.frame_size / 2 + 1;
-    impl_->max_frames = (max_samples + cfg.hop - 1) / cfg.hop + 1;
+        impl_->cfg = cfg;
+        impl_->max_channels = max_channels;
+        impl_->max_samples = max_samples;
+        impl_->bins = cfg.frame_size / 2 + 1;
+        impl_->max_frames = (max_samples + cfg.hop - 1) / cfg.hop + 1;
 
-    const size_t nf = (size_t)max_channels * impl_->max_frames;
-    const size_t out_len = (size_t)max_channels * (max_samples + cfg.frame_size);
+        const size_t nf = (size_t)max_channels * impl_->max_frames;
+        const size_t out_len = (size_t)max_channels * (max_samples + cfg.frame_size);
 
-    CU_CHECK(cudaMalloc(&impl_->d_pcm, (size_t)max_channels * max_samples * sizeof(float)));
-    CU_CHECK(cudaMalloc(&impl_->d_frames, nf * cfg.frame_size * sizeof(float)));
-    CU_CHECK(cudaMalloc(&impl_->d_spec, nf * impl_->bins * sizeof(cufftComplex)));
-    CU_CHECK(cudaMalloc(&impl_->d_spec2, nf * impl_->bins * sizeof(cufftComplex)));
-    impl_->ensure_out(out_len);
-    CU_CHECK(cudaMalloc(&impl_->d_resampled, out_len * sizeof(float)));
-    CU_CHECK(cudaMalloc(&impl_->d_win, cfg.frame_size * sizeof(float)));
-    CU_CHECK(cudaMalloc(&impl_->d_lastphase, (size_t)max_channels * impl_->bins * sizeof(float)));
-    CU_CHECK(cudaMalloc(&impl_->d_sumphase, (size_t)max_channels * impl_->bins * sizeof(float)));
+        CU_CHECK(cudaMalloc(&impl_->d_pcm, (size_t)max_channels * max_samples * sizeof(float)));
+        CU_CHECK(cudaMalloc(&impl_->d_frames, nf * cfg.frame_size * sizeof(float)));
+        CU_CHECK(cudaMalloc(&impl_->d_spec, nf * impl_->bins * sizeof(cufftComplex)));
+        CU_CHECK(cudaMalloc(&impl_->d_spec2, nf * impl_->bins * sizeof(cufftComplex)));
+        impl_->ensure_out(out_len);
+        CU_CHECK(cudaMalloc(&impl_->d_resampled, out_len * sizeof(float)));
+        CU_CHECK(cudaMalloc(&impl_->d_win, cfg.frame_size * sizeof(float)));
+        CU_CHECK(cudaMalloc(&impl_->d_lastphase, (size_t)max_channels * impl_->bins * sizeof(float)));
+        CU_CHECK(cudaMalloc(&impl_->d_sumphase, (size_t)max_channels * impl_->bins * sizeof(float)));
 
-    auto win = hann_window(cfg.frame_size);
-    CU_CHECK(cudaMemcpy(impl_->d_win, win.data(), win.size() * sizeof(float),
-                        cudaMemcpyHostToDevice));
+        auto win = hann_window(cfg.frame_size);
+        CU_CHECK(cudaMemcpy(impl_->d_win, win.data(), win.size() * sizeof(float),
+                            cudaMemcpyHostToDevice));
+    } catch (...) {
+        delete impl_;   // releases anything acquired before the throw
+        impl_ = nullptr;
+        throw;
+    }
 }
 
-StftProcessor::~StftProcessor() {
-    if (!impl_) return;
-    if (impl_->plan_fwd) cufftDestroy(impl_->plan_fwd);
-    if (impl_->plan_inv) cufftDestroy(impl_->plan_inv);
-    cudaFree(impl_->d_pcm);
-    cudaFree(impl_->d_frames);
-    cudaFree(impl_->d_spec);
-    cudaFree(impl_->d_spec2);
-    cudaFree(impl_->d_out);
-    cudaFree(impl_->d_wsum);
-    cudaFree(impl_->d_resampled);
-    cudaFree(impl_->d_win);
-    cudaFree(impl_->d_lastphase);
-    cudaFree(impl_->d_sumphase);
-    delete impl_;
-}
+StftProcessor::~StftProcessor() { delete impl_; }
 
 int StftProcessor::bins() const { return impl_->bins; }
 const StftConfig& StftProcessor::config() const { return impl_->cfg; }

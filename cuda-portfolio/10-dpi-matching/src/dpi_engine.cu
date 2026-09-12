@@ -187,34 +187,43 @@ struct DpiEngine::Impl {
     int* d_go = nullptr;
     unsigned int* d_out = nullptr;
     std::size_t table_bytes = 0;
+
+    // Owns every resource, so a constructor that throws partway through
+    // releases what it had already acquired. A class destructor never runs
+    // for an object whose constructor threw. Every release is null-safe.
+    ~Impl() {
+        cudaFree(d_go);
+        cudaFree(d_out);
+    }
 };
 
 DpiEngine::DpiEngine(const std::vector<std::string>& patterns) : impl_(new Impl) {
-    if (patterns.empty()) throw std::invalid_argument("need at least one pattern");
-    for (const auto& p : patterns) {
-        if (p.empty()) throw std::invalid_argument("patterns must be non-empty");
-        if (p.size() > 255) throw std::invalid_argument("pattern longer than 255 bytes");
+    try {
+        if (patterns.empty()) throw std::invalid_argument("need at least one pattern");
+        for (const auto& p : patterns) {
+            if (p.empty()) throw std::invalid_argument("patterns must be non-empty");
+            if (p.size() > 255) throw std::invalid_argument("pattern longer than 255 bytes");
+        }
+        impl_->patterns = patterns;
+        impl_->au = build(patterns);
+
+        CU_CHECK(cudaMalloc(&impl_->d_go, impl_->au.go.size() * sizeof(int)));
+        CU_CHECK(cudaMemcpy(impl_->d_go, impl_->au.go.data(), impl_->au.go.size() * sizeof(int),
+                            cudaMemcpyHostToDevice));
+        CU_CHECK(cudaMalloc(&impl_->d_out, impl_->au.out.size() * sizeof(unsigned int)));
+        CU_CHECK(cudaMemcpy(impl_->d_out, impl_->au.out.data(),
+                            impl_->au.out.size() * sizeof(unsigned int), cudaMemcpyHostToDevice));
+
+        impl_->table_bytes = impl_->au.go.size() * sizeof(int) +
+                             impl_->au.out.size() * sizeof(unsigned int);
+    } catch (...) {
+        delete impl_;   // releases anything acquired before the throw
+        impl_ = nullptr;
+        throw;
     }
-    impl_->patterns = patterns;
-    impl_->au = build(patterns);
-
-    CU_CHECK(cudaMalloc(&impl_->d_go, impl_->au.go.size() * sizeof(int)));
-    CU_CHECK(cudaMemcpy(impl_->d_go, impl_->au.go.data(), impl_->au.go.size() * sizeof(int),
-                        cudaMemcpyHostToDevice));
-    CU_CHECK(cudaMalloc(&impl_->d_out, impl_->au.out.size() * sizeof(unsigned int)));
-    CU_CHECK(cudaMemcpy(impl_->d_out, impl_->au.out.data(),
-                        impl_->au.out.size() * sizeof(unsigned int), cudaMemcpyHostToDevice));
-
-    impl_->table_bytes = impl_->au.go.size() * sizeof(int) +
-                         impl_->au.out.size() * sizeof(unsigned int);
 }
 
-DpiEngine::~DpiEngine() {
-    if (!impl_) return;
-    cudaFree(impl_->d_go);
-    cudaFree(impl_->d_out);
-    delete impl_;
-}
+DpiEngine::~DpiEngine() { delete impl_; }
 
 int DpiEngine::num_patterns() const { return (int)impl_->patterns.size(); }
 int DpiEngine::num_states() const { return impl_->au.n_states; }

@@ -98,7 +98,7 @@ for f in ["01-quant-llm/quant_gemv.cu", "02-hash-table/hash_table.cu",
 Colab's sandbox may restrict process spawning — if it fails, that is the
 environment, not the code.
 
-## Step 5 — the full portfolio (16 projects, 233 tests)
+## Step 5 — the full portfolio (16 projects, 251 tests)
 
 ```python
 %cd /content/cuda-learnings/cuda-portfolio
@@ -115,7 +115,7 @@ A full build takes **5–10 minutes** on Colab's CPU allocation.
 %cd ..
 ```
 
-Expect `100% tests passed out of 17`. Every test is written against an
+Expect `100% tests passed out of 18`. Every test is written against an
 independent reference (CPU models, NIST vectors, closed-form Black-Scholes,
 brute-force k-NN, Dijkstra), so passing on different hardware is meaningful
 rather than tautological.
@@ -161,6 +161,23 @@ anything. That is expected, not a hang.
 | `scripts/verify_all.ps1` | PowerShell | run `ctest` and the benchmarks directly |
 | **Nsight Compute (`ncu`)** | needs GPU performance counter access, which hosted VMs generally withhold | expect `ERR_NVGPUCTRPERM`; try it, but do not count on it |
 | **Nsight Systems (`nsys`)** | usually present | often works; try it |
+
+### compute-sanitizer: run it here, not on Windows
+
+On the Windows machine this repo was written on, `compute-sanitizer` could not
+attach to any process unelevated. Colab is where the suite can be checked for
+out-of-bounds device access and shared-memory races:
+
+```python
+!chmod +x scripts/sanitize.sh
+!./scripts/sanitize.sh                       # memcheck + racecheck, every suite
+!cat sanitizer/SUMMARY.md
+```
+
+Expect it to be slow: instrumentation costs 10-100x, and `test_error_paths`
+deliberately fills device memory. `racecheck` is the most valuable of the two
+here - it detects races on `__shared__` memory, the bug class that made
+`07-montecarlo` silently wrong at 100M paths.
 
 > **What is and is not verified.** Every measurement quoted in this repo was
 > taken on the Windows/MSVC machine it was written on. No part of this has been

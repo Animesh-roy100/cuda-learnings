@@ -243,23 +243,30 @@ bool Engine::antithetic() const { return impl_->antithetic; }
 
 Price Engine::price(const Option& opt, std::int64_t paths, int steps) const {
     if (paths <= 0) throw std::invalid_argument("paths must be positive");
+    // Validated BEFORE the allocation below. It used to be checked after, so
+    // every rejected call leaked the output buffer.
+    if (opt.style != Style::European && steps <= 0)
+        throw std::invalid_argument("steps must be positive");
 
     double* d_out = nullptr;
-    CU_CHECK(cudaMalloc(&d_out, 5 * sizeof(double)));
-    CU_CHECK(cudaMemset(d_out, 0, 5 * sizeof(double)));
-
-    if (opt.style == Style::European) {
-        k_european<<<impl_->blocks, impl_->threads>>>(opt, paths, impl_->antithetic,
-                                                      d_out, impl_->seed);
-    } else {
-        if (steps <= 0) throw std::invalid_argument("steps must be positive");
-        k_path_dependent<<<impl_->blocks, impl_->threads>>>(opt, paths, steps,
-                                                            d_out, impl_->seed);
-    }
-    CU_CHECK_KERNEL();
-
     double h[5] = {0, 0, 0, 0, 0};
-    CU_CHECK(cudaMemcpy(h, d_out, sizeof(h), cudaMemcpyDeviceToHost));
+    try {
+        CU_CHECK(cudaMalloc(&d_out, 5 * sizeof(double)));
+        CU_CHECK(cudaMemset(d_out, 0, 5 * sizeof(double)));
+
+        if (opt.style == Style::European) {
+            k_european<<<impl_->blocks, impl_->threads>>>(opt, paths, impl_->antithetic,
+                                                          d_out, impl_->seed);
+        } else {
+            k_path_dependent<<<impl_->blocks, impl_->threads>>>(opt, paths, steps,
+                                                                d_out, impl_->seed);
+        }
+        CU_CHECK_KERNEL();
+        CU_CHECK(cudaMemcpy(h, d_out, sizeof(h), cudaMemcpyDeviceToHost));
+    } catch (...) {
+        cudaFree(d_out);
+        throw;
+    }
     cudaFree(d_out);
 
     double n = static_cast<double>(paths);

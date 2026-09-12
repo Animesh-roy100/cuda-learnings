@@ -89,53 +89,72 @@ struct Preprocessor::Impl {
 
     void ensure_src(int slot, std::size_t bytes) {
         if (d_src_cap[slot] >= bytes) return;
-        if (d_src[slot]) cudaFree(d_src[slot]);
+        // Null the pointer and capacity BEFORE re-allocating. If cudaMalloc
+        // fails, a stale pointer here would be freed a second time by ~Impl.
+        cudaFree(d_src[slot]);
+        d_src[slot] = nullptr;
+        d_src_cap[slot] = 0;
         CU_CHECK(cudaMalloc(&d_src[slot], bytes));
         d_src_cap[slot] = bytes;
     }
     void ensure_host_src(std::size_t bytes) {
         if (h_src_cap >= bytes) return;
         if (h_src_pinned) cudaFreeHost(h_src_pinned);
+        h_src_pinned = nullptr;   // see ensure_src
+        h_src_cap = 0;
         // Pinned, because pageable memory forces the driver to stage through
         // an internal bounce buffer and roughly halves PCIe throughput.
         CU_CHECK(cudaHostAlloc(&h_src_pinned, bytes, cudaHostAllocDefault));
         h_src_cap = bytes;
     }
+
+    // Owns every resource, so a constructor that throws partway through
+    // releases what it had already acquired. A class destructor never runs
+    // for an object whose constructor threw. Every release is null-safe.
+    ~Impl() {
+        // Streams are created one at a time; a constructor that fails partway
+        // leaves the rest null. cudaStreamDestroy(nullptr) is an error, and
+        // an error left unread is misreported by the next CU_CHECK_KERNEL.
+        for (auto s : streams)
+            if (s) cudaStreamDestroy(s);
+        for (auto p : d_src) cudaFree(p);
+        cudaFree(d_dst);
+        if (h_pinned) cudaFreeHost(h_pinned);
+        if (h_src_pinned) cudaFreeHost(h_src_pinned);
+    }
 };
 
 Preprocessor::Preprocessor(const PreprocessConfig& cfg, int max_batch, int num_streams)
     : impl_(new Impl) {
-    if (max_batch <= 0) throw std::invalid_argument("max_batch must be positive");
-    if (num_streams <= 0) throw std::invalid_argument("num_streams must be positive");
-    if (cfg.out_w <= 0 || cfg.out_h <= 0)
-        throw std::invalid_argument("output size must be positive");
-    for (int c = 0; c < 3; ++c)
-        if (cfg.stdev[c] == 0.0f) throw std::invalid_argument("stdev must be non-zero");
+    try {
+        if (max_batch <= 0) throw std::invalid_argument("max_batch must be positive");
+        if (num_streams <= 0) throw std::invalid_argument("num_streams must be positive");
+        if (cfg.out_w <= 0 || cfg.out_h <= 0)
+            throw std::invalid_argument("output size must be positive");
+        for (int c = 0; c < 3; ++c)
+            if (cfg.stdev[c] == 0.0f) throw std::invalid_argument("stdev must be non-zero");
 
-    impl_->cfg = cfg;
-    impl_->max_batch = max_batch;
-    impl_->num_streams = num_streams;
-    impl_->out_floats = static_cast<std::size_t>(cfg.out_w) * cfg.out_h * 3;
+        impl_->cfg = cfg;
+        impl_->max_batch = max_batch;
+        impl_->num_streams = num_streams;
+        impl_->out_floats = static_cast<std::size_t>(cfg.out_w) * cfg.out_h * 3;
 
-    impl_->streams.resize(num_streams);
-    impl_->d_src.assign(num_streams, nullptr);
-    impl_->d_src_cap.assign(num_streams, 0);
-    for (int i = 0; i < num_streams; ++i) CU_CHECK(cudaStreamCreate(&impl_->streams[i]));
+        impl_->streams.resize(num_streams);
+        impl_->d_src.assign(num_streams, nullptr);
+        impl_->d_src_cap.assign(num_streams, 0);
+        for (int i = 0; i < num_streams; ++i) CU_CHECK(cudaStreamCreate(&impl_->streams[i]));
 
-    CU_CHECK(cudaMalloc(&impl_->d_dst, impl_->out_floats * max_batch * sizeof(float)));
-    CU_CHECK(cudaHostAlloc(&impl_->h_pinned, impl_->out_floats * max_batch * sizeof(float),
-                           cudaHostAllocDefault));
+        CU_CHECK(cudaMalloc(&impl_->d_dst, impl_->out_floats * max_batch * sizeof(float)));
+        CU_CHECK(cudaHostAlloc(&impl_->h_pinned, impl_->out_floats * max_batch * sizeof(float),
+                               cudaHostAllocDefault));
+    } catch (...) {
+        delete impl_;   // releases anything acquired before the throw
+        impl_ = nullptr;
+        throw;
+    }
 }
 
-Preprocessor::~Preprocessor() {
-    if (!impl_) return;
-    for (auto s : impl_->streams) cudaStreamDestroy(s);
-    for (auto p : impl_->d_src) cudaFree(p);
-    cudaFree(impl_->d_dst);
-    if (impl_->h_pinned) cudaFreeHost(impl_->h_pinned);
-    if (impl_->h_src_pinned) cudaFreeHost(impl_->h_src_pinned);
-    delete impl_;
-}
+Preprocessor::~Preprocessor() { delete impl_; }
 
 std::size_t Preprocessor::output_floats_per_image() const { return impl_->out_floats; }
 const PreprocessConfig& Preprocessor::config() const { return impl_->cfg; }

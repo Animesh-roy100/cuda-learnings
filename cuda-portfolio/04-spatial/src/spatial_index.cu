@@ -251,58 +251,68 @@ struct SpatialIndex::Impl {
     i32* d_start = nullptr;
     i32* d_end = nullptr;
     BuildStats stats;
+
+    // Owns every resource, so a constructor that throws partway through
+    // releases what it had already acquired. A class destructor never runs
+    // for an object whose constructor threw. Every release is null-safe.
+    ~Impl() {
+        cudaFree(d_sorted);
+        cudaFree(d_code);
+        cudaFree(d_idx);
+        cudaFree(d_start);
+        cudaFree(d_end);
+    }
 };
 
 SpatialIndex::SpatialIndex(const std::vector<Point3>& points) : impl_(new Impl) {
-    impl_->n = static_cast<int>(points.size());
-    impl_->code_space = morton_encode(GRID - 1, GRID - 1, GRID - 1) + 1;
-    const int n = impl_->n;
-    if (n == 0) return;
+    float3* d_raw = nullptr;   // construction scratch, freed on every exit path
+    try {
+        impl_->n = static_cast<int>(points.size());
+        impl_->code_space = morton_encode(GRID - 1, GRID - 1, GRID - 1) + 1;
+        const int n = impl_->n;
+        if (n == 0) return;
 
-    float3* d_raw = nullptr;
-    CU_CHECK(cudaMalloc(&d_raw, sizeof(float3) * n));
-    CU_CHECK(cudaMalloc(&impl_->d_sorted, sizeof(float3) * n));
-    CU_CHECK(cudaMalloc(&impl_->d_code, sizeof(u32) * n));
-    CU_CHECK(cudaMalloc(&impl_->d_idx, sizeof(u32) * n));
-    CU_CHECK(cudaMalloc(&impl_->d_start, sizeof(i32) * impl_->code_space));
-    CU_CHECK(cudaMalloc(&impl_->d_end, sizeof(i32) * impl_->code_space));
-    CU_CHECK(cudaMemcpy(d_raw, points.data(), sizeof(float3) * n, cudaMemcpyHostToDevice));
+        CU_CHECK(cudaMalloc(&d_raw, sizeof(float3) * n));
+        CU_CHECK(cudaMalloc(&impl_->d_sorted, sizeof(float3) * n));
+        CU_CHECK(cudaMalloc(&impl_->d_code, sizeof(u32) * n));
+        CU_CHECK(cudaMalloc(&impl_->d_idx, sizeof(u32) * n));
+        CU_CHECK(cudaMalloc(&impl_->d_start, sizeof(i32) * impl_->code_space));
+        CU_CHECK(cudaMalloc(&impl_->d_end, sizeof(i32) * impl_->code_space));
+        CU_CHECK(cudaMemcpy(d_raw, points.data(), sizeof(float3) * n, cudaMemcpyHostToDevice));
 
-    const int T = 256, B = (n + T - 1) / T;
-    cu::EventTimer t;
+        const int T = 256, B = (n + T - 1) / T;
+        cu::EventTimer t;
 
-    t.start();
-    k_morton<<<B, T>>>(d_raw, impl_->d_code, impl_->d_idx, n);
-    CU_CHECK_KERNEL();
-    impl_->stats.morton_ms = t.stop();
+        t.start();
+        k_morton<<<B, T>>>(d_raw, impl_->d_code, impl_->d_idx, n);
+        CU_CHECK_KERNEL();
+        impl_->stats.morton_ms = t.stop();
 
-    t.start();
-    thrust::sort_by_key(thrust::device_ptr<u32>(impl_->d_code),
-                        thrust::device_ptr<u32>(impl_->d_code + n),
-                        thrust::device_ptr<u32>(impl_->d_idx));
-    CU_CHECK(cudaDeviceSynchronize());
-    impl_->stats.sort_ms = t.stop();
+        t.start();
+        thrust::sort_by_key(thrust::device_ptr<u32>(impl_->d_code),
+                            thrust::device_ptr<u32>(impl_->d_code + n),
+                            thrust::device_ptr<u32>(impl_->d_idx));
+        CU_CHECK(cudaDeviceSynchronize());
+        impl_->stats.sort_ms = t.stop();
 
-    t.start();
-    k_reorder<<<B, T>>>(d_raw, impl_->d_idx, impl_->d_sorted, n);
-    CU_CHECK(cudaMemset(impl_->d_start, 0, sizeof(i32) * impl_->code_space));
-    CU_CHECK(cudaMemset(impl_->d_end, 0, sizeof(i32) * impl_->code_space));
-    k_cell_ranges<<<B, T>>>(impl_->d_code, n, impl_->d_start, impl_->d_end);
-    CU_CHECK_KERNEL();
-    impl_->stats.ranges_ms = t.stop();
+        t.start();
+        k_reorder<<<B, T>>>(d_raw, impl_->d_idx, impl_->d_sorted, n);
+        CU_CHECK(cudaMemset(impl_->d_start, 0, sizeof(i32) * impl_->code_space));
+        CU_CHECK(cudaMemset(impl_->d_end, 0, sizeof(i32) * impl_->code_space));
+        k_cell_ranges<<<B, T>>>(impl_->d_code, n, impl_->d_start, impl_->d_end);
+        CU_CHECK_KERNEL();
+        impl_->stats.ranges_ms = t.stop();
 
-    cudaFree(d_raw);
+        cudaFree(d_raw);
+    } catch (...) {
+        cudaFree(d_raw);
+        delete impl_;   // releases anything acquired before the throw
+        impl_ = nullptr;
+        throw;
+    }
 }
 
-SpatialIndex::~SpatialIndex() {
-    if (!impl_) return;
-    cudaFree(impl_->d_sorted);
-    cudaFree(impl_->d_code);
-    cudaFree(impl_->d_idx);
-    cudaFree(impl_->d_start);
-    cudaFree(impl_->d_end);
-    delete impl_;
-}
+SpatialIndex::~SpatialIndex() { delete impl_; }
 
 BuildStats SpatialIndex::build_stats() const { return impl_->stats; }
 i32 SpatialIndex::size() const { return impl_->n; }

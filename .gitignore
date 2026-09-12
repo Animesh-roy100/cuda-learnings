@@ -27,3 +27,6 @@ desktop.ini
 # so plain "profiles/..." would not match cuda-portfolio/profiles/...
 **/profiles/*_ncu.csv
 **/profiles/*.sqlite
+
+# compute-sanitizer logs (scripts/sanitize.*)
+cuda-portfolio/sanitizer/

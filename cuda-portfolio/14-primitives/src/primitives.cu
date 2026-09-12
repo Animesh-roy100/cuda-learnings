@@ -286,9 +286,10 @@ std::vector<MemoryResult> compare_memory_modes(std::size_t elements, int passes)
             continue;
         }
         // Both tuning APIs are gated on concurrentManagedAccess, and calling
-        // either without it returns cudaErrorInvalidDevice -- a STICKY error
-        // that poisons the context and makes every later kernel launch in the
-        // process fail. So they are skipped up front rather than attempted.
+        // either without it returns cudaErrorInvalidDevice. That error is not
+        // sticky, but left unread it is picked up by the next kernel check and
+        // misreported as a launch failure. So they are skipped up front rather
+        // than attempted.
         if (mode == MemoryMode::ManagedAdvised && !caps.advise_supported()) {
             r.supported = false;
             r.skip_reason = "cudaMemAdvise needs concurrentManagedAccess, which "

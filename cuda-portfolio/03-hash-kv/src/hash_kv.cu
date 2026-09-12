@@ -10,6 +10,8 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <stdexcept>
+#include <string>
 
 #include "cu/check.hpp"
 #include "cu/timer.hpp"
@@ -240,7 +242,13 @@ __global__ void k_displacement(const u64* __restrict__ table, std::size_t cap, u
     atomicMax(maxv, m);
 }
 
+// Slots are addressed through a 32-bit mask (and probe distances are u32), so
+// the table cannot usefully exceed 2^32 slots.
+constexpr std::size_t kMaxCapacity = std::size_t(1) << 32;
+
 std::size_t round_up_pow2(std::size_t n) {
+    // Callers must bound n first. Past 2^63 the doubling overflows to zero and
+    // `c < n` stays true forever -- GpuHashTable(SIZE_MAX) used to hang here.
     std::size_t c = 1;
     while (c < n) c <<= 1;
     return c;
@@ -257,34 +265,43 @@ struct GpuHashTable::Impl {
     InsertStats stats{};
 
     unsigned long long* d_scratch = nullptr;   // [sum, max, count]
+
+    // Owns every resource, so a constructor that throws partway through
+    // releases what it had already acquired. A class destructor never runs
+    // for an object whose constructor threw. Every release is null-safe.
+    ~Impl() {
+        cudaFree(table);
+        cudaFree(d_scratch);
+    }
 };
 
 GpuHashTable::GpuHashTable(std::size_t capacity, Probe probe) : impl_(new Impl) {
-    impl_->cap = round_up_pow2(std::max<std::size_t>(capacity, 32));
-    impl_->mask = static_cast<u32>(impl_->cap - 1);
-    impl_->probe = probe;
-    CU_CHECK(cudaMalloc(&impl_->table, impl_->cap * sizeof(u64)));
-    CU_CHECK(cudaMalloc(&impl_->d_scratch, 3 * sizeof(unsigned long long)));
-    clear();
-}
-
-GpuHashTable::~GpuHashTable() {
-    if (impl_) {
-        cudaFree(impl_->table);
-        cudaFree(impl_->d_scratch);
-        delete impl_;
+    try {
+        if (capacity > kMaxCapacity)
+            throw std::invalid_argument(
+                "GpuHashTable: capacity " + std::to_string(capacity) +
+                " exceeds 2^32 slots, the most a 32-bit slot mask can address");
+        impl_->cap = round_up_pow2(std::max<std::size_t>(capacity, 32));
+        impl_->mask = static_cast<u32>(impl_->cap - 1);
+        impl_->probe = probe;
+        CU_CHECK(cudaMalloc(&impl_->table, impl_->cap * sizeof(u64)));
+        CU_CHECK(cudaMalloc(&impl_->d_scratch, 3 * sizeof(unsigned long long)));
+        clear();
+    } catch (...) {
+        delete impl_;   // releases anything acquired before the throw
+        impl_ = nullptr;
+        throw;
     }
 }
+
+GpuHashTable::~GpuHashTable() { delete impl_; }
 
 GpuHashTable::GpuHashTable(GpuHashTable&& o) noexcept : impl_(o.impl_) { o.impl_ = nullptr; }
 
 GpuHashTable& GpuHashTable::operator=(GpuHashTable&& o) noexcept {
     if (this != &o) {
-        if (impl_) {
-            cudaFree(impl_->table);
-            cudaFree(impl_->d_scratch);
-            delete impl_;
-        }
+        delete impl_;   // Impl::~Impl releases the table; freeing it here too
+                        // would be a double free
         impl_ = o.impl_;
         o.impl_ = nullptr;
     }

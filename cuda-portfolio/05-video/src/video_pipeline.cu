@@ -152,56 +152,65 @@ struct VideoPipeline::Impl {
     unsigned char* d_pitched = nullptr;
     size_t pitch = 0;
     cudaTextureObject_t tex = 0;
+
+    // Owns every resource, so a constructor that throws partway through
+    // releases what it had already acquired. A class destructor never runs
+    // for an object whose constructor threw. Every release is null-safe.
+    ~Impl() {
+        if (tex) cudaDestroyTextureObject(tex);
+        cudaFree(d_nv12);
+        cudaFree(d_rgb);
+        cudaFree(d_gray);
+        cudaFree(d_out);
+        cudaFree(d_prev);
+        cudaFree(d_mhi);
+        cudaFree(d_pitched);
+    }
 };
 
 VideoPipeline::VideoPipeline(int width, int height) : impl_(new Impl) {
-    if (width <= 0 || height <= 0 || (width % 2) || (height % 2))
-        throw std::invalid_argument("frame size must be positive and even (NV12 chroma)");
-    impl_->w = width;
-    impl_->h = height;
-    const size_t n = (size_t)width * height;
+    try {
+        if (width <= 0 || height <= 0 || (width % 2) || (height % 2))
+            throw std::invalid_argument("frame size must be positive and even (NV12 chroma)");
+        impl_->w = width;
+        impl_->h = height;
+        const size_t n = (size_t)width * height;
 
-    CU_CHECK(cudaMalloc(&impl_->d_nv12, Nv12Frame::bytes(width, height)));
-    CU_CHECK(cudaMalloc(&impl_->d_rgb, n * 3));
-    CU_CHECK(cudaMalloc(&impl_->d_gray, n));
-    CU_CHECK(cudaMalloc(&impl_->d_out, n));
-    CU_CHECK(cudaMalloc(&impl_->d_prev, n));
-    CU_CHECK(cudaMalloc(&impl_->d_mhi, n));
-    CU_CHECK(cudaMemset(impl_->d_prev, 0, n));
-    CU_CHECK(cudaMemset(impl_->d_mhi, 0, n));
+        CU_CHECK(cudaMalloc(&impl_->d_nv12, Nv12Frame::bytes(width, height)));
+        CU_CHECK(cudaMalloc(&impl_->d_rgb, n * 3));
+        CU_CHECK(cudaMalloc(&impl_->d_gray, n));
+        CU_CHECK(cudaMalloc(&impl_->d_out, n));
+        CU_CHECK(cudaMalloc(&impl_->d_prev, n));
+        CU_CHECK(cudaMalloc(&impl_->d_mhi, n));
+        CU_CHECK(cudaMemset(impl_->d_prev, 0, n));
+        CU_CHECK(cudaMemset(impl_->d_mhi, 0, n));
 
-    CU_CHECK(cudaMallocPitch(&impl_->d_pitched, &impl_->pitch, width, height));
+        CU_CHECK(cudaMallocPitch(&impl_->d_pitched, &impl_->pitch, width, height));
 
-    cudaResourceDesc res{};
-    res.resType = cudaResourceTypePitch2D;
-    res.res.pitch2D.devPtr = impl_->d_pitched;
-    res.res.pitch2D.width = width;
-    res.res.pitch2D.height = height;
-    res.res.pitch2D.pitchInBytes = impl_->pitch;
-    res.res.pitch2D.desc = cudaCreateChannelDesc<unsigned char>();
+        cudaResourceDesc res{};
+        res.resType = cudaResourceTypePitch2D;
+        res.res.pitch2D.devPtr = impl_->d_pitched;
+        res.res.pitch2D.width = width;
+        res.res.pitch2D.height = height;
+        res.res.pitch2D.pitchInBytes = impl_->pitch;
+        res.res.pitch2D.desc = cudaCreateChannelDesc<unsigned char>();
 
-    cudaTextureDesc td{};
-    td.addressMode[0] = cudaAddressModeClamp;   // free boundary handling
-    td.addressMode[1] = cudaAddressModeClamp;
-    td.filterMode = cudaFilterModePoint;        // exact texels, no interpolation
-    td.readMode = cudaReadModeElementType;
-    td.normalizedCoords = 0;
+        cudaTextureDesc td{};
+        td.addressMode[0] = cudaAddressModeClamp;   // free boundary handling
+        td.addressMode[1] = cudaAddressModeClamp;
+        td.filterMode = cudaFilterModePoint;        // exact texels, no interpolation
+        td.readMode = cudaReadModeElementType;
+        td.normalizedCoords = 0;
 
-    CU_CHECK(cudaCreateTextureObject(&impl_->tex, &res, &td, nullptr));
+        CU_CHECK(cudaCreateTextureObject(&impl_->tex, &res, &td, nullptr));
+    } catch (...) {
+        delete impl_;   // releases anything acquired before the throw
+        impl_ = nullptr;
+        throw;
+    }
 }
 
-VideoPipeline::~VideoPipeline() {
-    if (!impl_) return;
-    if (impl_->tex) cudaDestroyTextureObject(impl_->tex);
-    cudaFree(impl_->d_nv12);
-    cudaFree(impl_->d_rgb);
-    cudaFree(impl_->d_gray);
-    cudaFree(impl_->d_out);
-    cudaFree(impl_->d_prev);
-    cudaFree(impl_->d_mhi);
-    cudaFree(impl_->d_pitched);
-    delete impl_;
-}
+VideoPipeline::~VideoPipeline() { delete impl_; }
 
 int VideoPipeline::width() const { return impl_->w; }
 int VideoPipeline::height() const { return impl_->h; }
@@ -453,11 +462,18 @@ TransferReport measure_transfers(std::size_t bytes) {
 
 bool cuda_ipc_available() {
     void* p = nullptr;
-    if (cudaMalloc(&p, 1024) != cudaSuccess) return false;
+    if (cudaMalloc(&p, 1024) != cudaSuccess) {
+        cudaGetLastError();
+        return false;
+    }
     cudaIpcMemHandle_t h;
     cudaError_t e = cudaIpcGetMemHandle(&h, p);
     cudaFree(p);
-    cudaGetLastError();   // clear the sticky error if it failed
+    // Not sticky -- the context is fine -- but a failed call leaves its error
+    // recorded, and the next CU_CHECK_KERNEL would report it as a kernel
+    // failure. This probe is expected to fail on platforms without IPC, so it
+    // must consume what it leaves behind.
+    cudaGetLastError();
     return e == cudaSuccess;
 }
 

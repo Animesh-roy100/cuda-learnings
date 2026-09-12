@@ -1,0 +1,88 @@
+# Linux build check.
+#
+# Every number in this repository was measured on Windows with MSVC. This
+# workflow is the only place any of it is compiled with gcc, and the only place
+# the CUDA 12 side of the CUDART_VERSION branches in 14-primitives is compiled
+# at all. It proves the code BUILDS on Linux against both toolkit generations;
+# it cannot prove it RUNS, because GitHub-hosted runners have no GPU. Running
+# the suite on a real Turing card is what COLAB.md is for.
+
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  portfolio:
+    name: portfolio / CUDA ${{ matrix.cuda }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Closest to Colab's toolkit, and exercises the CUDA 12 API paths.
+          - cuda: "12.8.2"
+            image: nvidia/cuda:12.8.2-devel-ubuntu22.04
+          # CUDA 13: the cudaMemLocation API, CCCL layout, gcc 13.
+          - cuda: "13.3.1"
+            image: nvidia/cuda:13.3.1-devel-ubuntu24.04
+    container:
+      image: ${{ matrix.image }}
+
+    steps:
+      - name: Install build tools
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          # Ubuntu 24.04's pip refuses system installs without this; 22.04's
+          # older pip ignores it.
+          PIP_BREAK_SYSTEM_PACKAGES: "1"
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates python3-pip
+          # The apt cmake on 22.04 is 3.22; the project needs 3.24+.
+          python3 -m pip install --no-cache-dir "cmake>=3.24" ninja
+          cmake --version
+          nvcc --version
+          gcc --version
+
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        working-directory: cuda-portfolio
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_CUDA_ARCHITECTURES=75
+
+      - name: Build
+        working-directory: cuda-portfolio
+        # Thrust-heavy translation units need several GB each under nvcc, and a
+        # hosted runner has 16 GB. Full parallelism has been known to OOM-kill
+        # the compiler with no useful message.
+        run: cmake --build build -j 2
+
+      # Through the repo's own build.sh scripts, not a copy of their flags, so
+      # the scripts COLAB.md tells people to run are what gets checked.
+      - name: Build the standalone programs
+        run: |
+          set -e
+          for dir in cuda-learning cuda-projects; do
+            cd "$GITHUB_WORKSPACE/$dir"
+            chmod +x build.sh
+            for f in */*.cu; do
+              echo "::group::$dir/$f"
+              ./build.sh "$f"
+              echo "::endgroup::"
+            done
+          done
+
+      - name: List built binaries
+        working-directory: cuda-portfolio
+        run: ls -la build/bin

@@ -230,134 +230,143 @@ struct SparseMatrix::Impl {
 
     std::size_t bytes_csr = 0, bytes_ell = 0, bytes_hyb = 0;
     std::int64_t ell_padding = 0, hyb_padding = 0;
+
+    // Owns every resource, so a constructor that throws partway through
+    // releases what it had already acquired. A class destructor never runs
+    // for an object whose constructor threw. Every release is null-safe.
+    ~Impl() {
+        cudaFree(d_row_ptr); cudaFree(d_col); cudaFree(d_val);
+        cudaFree(d_ell_col); cudaFree(d_ell_val);
+        cudaFree(d_hyb_col); cudaFree(d_hyb_val);
+        cudaFree(d_over_rows); cudaFree(d_over_ptr);
+        cudaFree(d_over_col); cudaFree(d_over_val);
+    }
 };
 
 SparseMatrix::SparseMatrix(const CooMatrix& coo) : impl_(new Impl) {
-    if (coo.rows <= 0 || coo.cols <= 0) throw std::invalid_argument("empty matrix");
-    if (coo.row_idx.size() != coo.values.size() || coo.col_idx.size() != coo.values.size())
-        throw std::invalid_argument("COO arrays must have equal length");
+    try {
+        if (coo.rows <= 0 || coo.cols <= 0) throw std::invalid_argument("empty matrix");
+        if (coo.row_idx.size() != coo.values.size() || coo.col_idx.size() != coo.values.size())
+            throw std::invalid_argument("COO arrays must have equal length");
 
-    impl_->n = coo.rows;
-    impl_->cols = coo.cols;
-    impl_->nnz = coo.nnz();
-    const i32 n = coo.rows;
+        impl_->n = coo.rows;
+        impl_->cols = coo.cols;
+        impl_->nnz = coo.nnz();
+        const i32 n = coo.rows;
 
-    // --- COO -> CSR by counting sort ---
-    std::vector<i32> count(n, 0);
-    for (auto r : coo.row_idx) {
-        if (r < 0 || r >= n) throw std::invalid_argument("row index out of range");
-        count[r]++;
-    }
-    std::vector<i32> row_ptr(n + 1, 0);
-    for (i32 r = 0; r < n; ++r) row_ptr[r + 1] = row_ptr[r] + count[r];
-
-    std::vector<i32> col((std::size_t)impl_->nnz);
-    std::vector<float> val((std::size_t)impl_->nnz);
-    std::vector<i32> cursor(row_ptr.begin(), row_ptr.end() - 1);
-    for (std::size_t e = 0; e < coo.values.size(); ++e) {
-        if (coo.col_idx[e] < 0 || coo.col_idx[e] >= coo.cols)
-            throw std::invalid_argument("column index out of range");
-        const i32 pos = cursor[coo.row_idx[e]]++;
-        col[pos] = coo.col_idx[e];
-        val[pos] = coo.values[e];
-    }
-
-    impl_->max_row = 0;
-    for (i32 r = 0; r < n; ++r) impl_->max_row = std::max(impl_->max_row, count[r]);
-    impl_->mean_row = double(impl_->nnz) / n;
-
-    auto up_i = [](i32** d, const std::vector<i32>& h) {
-        CU_CHECK(cudaMalloc(d, std::max<std::size_t>(h.size(), 1) * sizeof(i32)));
-        if (!h.empty())
-            CU_CHECK(cudaMemcpy(*d, h.data(), h.size() * sizeof(i32), cudaMemcpyHostToDevice));
-    };
-    auto up_f = [](float** d, const std::vector<float>& h) {
-        CU_CHECK(cudaMalloc(d, std::max<std::size_t>(h.size(), 1) * sizeof(float)));
-        if (!h.empty())
-            CU_CHECK(cudaMemcpy(*d, h.data(), h.size() * sizeof(float), cudaMemcpyHostToDevice));
-    };
-    up_i(&impl_->d_row_ptr, row_ptr);
-    up_i(&impl_->d_col, col);
-    up_f(&impl_->d_val, val);
-    impl_->bytes_csr = row_ptr.size() * sizeof(i32) + col.size() * sizeof(i32) +
-                       val.size() * sizeof(float);
-
-    // --- ELLPACK, column major, padded to the longest row ---
-    impl_->ell_width = impl_->max_row;
-    const std::size_t ell_n = (std::size_t)impl_->ell_width * n;
-    {
-        std::vector<i32> ecol(ell_n, -1);
-        std::vector<float> eval(ell_n, 0.0f);
-        for (i32 r = 0; r < n; ++r) {
-            const i32 begin = row_ptr[r], end = row_ptr[r + 1];
-            for (i32 e = begin; e < end; ++e) {
-                const std::size_t j = e - begin;
-                ecol[j * n + r] = col[e];
-                eval[j * n + r] = val[e];
-            }
+        // --- COO -> CSR by counting sort ---
+        std::vector<i32> count(n, 0);
+        for (auto r : coo.row_idx) {
+            if (r < 0 || r >= n) throw std::invalid_argument("row index out of range");
+            count[r]++;
         }
-        up_i(&impl_->d_ell_col, ecol);
-        up_f(&impl_->d_ell_val, eval);
-        impl_->bytes_ell = ell_n * (sizeof(i32) + sizeof(float));
-        impl_->ell_padding = (std::int64_t)ell_n - impl_->nnz;
-    }
+        std::vector<i32> row_ptr(n + 1, 0);
+        for (i32 r = 0; r < n; ++r) row_ptr[r + 1] = row_ptr[r] + count[r];
 
-    // --- Hybrid: cut at a width that covers most rows ---
-    // The cut is the mean plus a margin. Chasing the exact optimum is not the
-    // point; covering the bulk of rows while leaving the heavy tail to CSR is.
-    {
-        std::vector<i32> sorted(count);
-        std::sort(sorted.begin(), sorted.end());
-        const int p90 = sorted[(std::size_t)(n * 0.90)];
-        impl_->hyb_width = std::max(1, std::min(p90, impl_->max_row));
+        std::vector<i32> col((std::size_t)impl_->nnz);
+        std::vector<float> val((std::size_t)impl_->nnz);
+        std::vector<i32> cursor(row_ptr.begin(), row_ptr.end() - 1);
+        for (std::size_t e = 0; e < coo.values.size(); ++e) {
+            if (coo.col_idx[e] < 0 || coo.col_idx[e] >= coo.cols)
+                throw std::invalid_argument("column index out of range");
+            const i32 pos = cursor[coo.row_idx[e]]++;
+            col[pos] = coo.col_idx[e];
+            val[pos] = coo.values[e];
+        }
 
-        const std::size_t hn = (std::size_t)impl_->hyb_width * n;
-        std::vector<i32> hcol(hn, -1);
-        std::vector<float> hval(hn, 0.0f);
+        impl_->max_row = 0;
+        for (i32 r = 0; r < n; ++r) impl_->max_row = std::max(impl_->max_row, count[r]);
+        impl_->mean_row = double(impl_->nnz) / n;
 
-        std::vector<i32> over_rows, over_ptr{0}, over_col;
-        std::vector<float> over_val;
-        for (i32 r = 0; r < n; ++r) {
-            const i32 begin = row_ptr[r], end = row_ptr[r + 1];
-            const i32 len = end - begin;
-            const i32 in_ell = std::min<i32>(len, impl_->hyb_width);
-            for (i32 j = 0; j < in_ell; ++j) {
-                hcol[(std::size_t)j * n + r] = col[begin + j];
-                hval[(std::size_t)j * n + r] = val[begin + j];
-            }
-            if (len > impl_->hyb_width) {
-                over_rows.push_back(r);
-                for (i32 e = begin + impl_->hyb_width; e < end; ++e) {
-                    over_col.push_back(col[e]);
-                    over_val.push_back(val[e]);
+        auto up_i = [](i32** d, const std::vector<i32>& h) {
+            CU_CHECK(cudaMalloc(d, std::max<std::size_t>(h.size(), 1) * sizeof(i32)));
+            if (!h.empty())
+                CU_CHECK(cudaMemcpy(*d, h.data(), h.size() * sizeof(i32), cudaMemcpyHostToDevice));
+        };
+        auto up_f = [](float** d, const std::vector<float>& h) {
+            CU_CHECK(cudaMalloc(d, std::max<std::size_t>(h.size(), 1) * sizeof(float)));
+            if (!h.empty())
+                CU_CHECK(cudaMemcpy(*d, h.data(), h.size() * sizeof(float), cudaMemcpyHostToDevice));
+        };
+        up_i(&impl_->d_row_ptr, row_ptr);
+        up_i(&impl_->d_col, col);
+        up_f(&impl_->d_val, val);
+        impl_->bytes_csr = row_ptr.size() * sizeof(i32) + col.size() * sizeof(i32) +
+                           val.size() * sizeof(float);
+
+        // --- ELLPACK, column major, padded to the longest row ---
+        impl_->ell_width = impl_->max_row;
+        const std::size_t ell_n = (std::size_t)impl_->ell_width * n;
+        {
+            std::vector<i32> ecol(ell_n, -1);
+            std::vector<float> eval(ell_n, 0.0f);
+            for (i32 r = 0; r < n; ++r) {
+                const i32 begin = row_ptr[r], end = row_ptr[r + 1];
+                for (i32 e = begin; e < end; ++e) {
+                    const std::size_t j = e - begin;
+                    ecol[j * n + r] = col[e];
+                    eval[j * n + r] = val[e];
                 }
-                over_ptr.push_back((i32)over_col.size());
             }
+            up_i(&impl_->d_ell_col, ecol);
+            up_f(&impl_->d_ell_val, eval);
+            impl_->bytes_ell = ell_n * (sizeof(i32) + sizeof(float));
+            impl_->ell_padding = (std::int64_t)ell_n - impl_->nnz;
         }
-        impl_->n_over = (i32)over_rows.size();
-        up_i(&impl_->d_hyb_col, hcol);
-        up_f(&impl_->d_hyb_val, hval);
-        up_i(&impl_->d_over_rows, over_rows);
-        up_i(&impl_->d_over_ptr, over_ptr);
-        up_i(&impl_->d_over_col, over_col);
-        up_f(&impl_->d_over_val, over_val);
 
-        impl_->bytes_hyb = hn * (sizeof(i32) + sizeof(float)) +
-                           over_col.size() * (sizeof(i32) + sizeof(float)) +
-                           over_rows.size() * sizeof(i32) + over_ptr.size() * sizeof(i32);
-        impl_->hyb_padding = (std::int64_t)hn - (impl_->nnz - (std::int64_t)over_col.size());
+        // --- Hybrid: cut at a width that covers most rows ---
+        // The cut is the mean plus a margin. Chasing the exact optimum is not the
+        // point; covering the bulk of rows while leaving the heavy tail to CSR is.
+        {
+            std::vector<i32> sorted(count);
+            std::sort(sorted.begin(), sorted.end());
+            const int p90 = sorted[(std::size_t)(n * 0.90)];
+            impl_->hyb_width = std::max(1, std::min(p90, impl_->max_row));
+
+            const std::size_t hn = (std::size_t)impl_->hyb_width * n;
+            std::vector<i32> hcol(hn, -1);
+            std::vector<float> hval(hn, 0.0f);
+
+            std::vector<i32> over_rows, over_ptr{0}, over_col;
+            std::vector<float> over_val;
+            for (i32 r = 0; r < n; ++r) {
+                const i32 begin = row_ptr[r], end = row_ptr[r + 1];
+                const i32 len = end - begin;
+                const i32 in_ell = std::min<i32>(len, impl_->hyb_width);
+                for (i32 j = 0; j < in_ell; ++j) {
+                    hcol[(std::size_t)j * n + r] = col[begin + j];
+                    hval[(std::size_t)j * n + r] = val[begin + j];
+                }
+                if (len > impl_->hyb_width) {
+                    over_rows.push_back(r);
+                    for (i32 e = begin + impl_->hyb_width; e < end; ++e) {
+                        over_col.push_back(col[e]);
+                        over_val.push_back(val[e]);
+                    }
+                    over_ptr.push_back((i32)over_col.size());
+                }
+            }
+            impl_->n_over = (i32)over_rows.size();
+            up_i(&impl_->d_hyb_col, hcol);
+            up_f(&impl_->d_hyb_val, hval);
+            up_i(&impl_->d_over_rows, over_rows);
+            up_i(&impl_->d_over_ptr, over_ptr);
+            up_i(&impl_->d_over_col, over_col);
+            up_f(&impl_->d_over_val, over_val);
+
+            impl_->bytes_hyb = hn * (sizeof(i32) + sizeof(float)) +
+                               over_col.size() * (sizeof(i32) + sizeof(float)) +
+                               over_rows.size() * sizeof(i32) + over_ptr.size() * sizeof(i32);
+            impl_->hyb_padding = (std::int64_t)hn - (impl_->nnz - (std::int64_t)over_col.size());
+        }
+    } catch (...) {
+        delete impl_;   // releases anything acquired before the throw
+        impl_ = nullptr;
+        throw;
     }
 }
 
-SparseMatrix::~SparseMatrix() {
-    if (!impl_) return;
-    cudaFree(impl_->d_row_ptr); cudaFree(impl_->d_col); cudaFree(impl_->d_val);
-    cudaFree(impl_->d_ell_col); cudaFree(impl_->d_ell_val);
-    cudaFree(impl_->d_hyb_col); cudaFree(impl_->d_hyb_val);
-    cudaFree(impl_->d_over_rows); cudaFree(impl_->d_over_ptr);
-    cudaFree(impl_->d_over_col); cudaFree(impl_->d_over_val);
-    delete impl_;
-}
+SparseMatrix::~SparseMatrix() { delete impl_; }
 
 i32 SparseMatrix::rows() const { return impl_->n; }
 i32 SparseMatrix::cols() const { return impl_->cols; }

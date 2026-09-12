@@ -35,7 +35,7 @@ same architecture this targets. The code runs unmodified; only the machine
 around it changes (Linux, CUDA 12, 16 GB instead of 4).
 
 **[COLAB.md](COLAB.md)** has the full walkthrough, including a single cell that
-goes from nothing to a passing 233-test suite.
+goes from nothing to a passing 251-test suite.
 
 ## Layout
 
@@ -78,7 +78,7 @@ cd build && ctest --output-on-failure
 ```
 
 ```
-100% tests passed out of 17 suites     (233 test cases)
+100% tests passed out of 18 suites     (251 test cases)
 ```
 
 | # | Project | Headline result |
@@ -169,11 +169,15 @@ put the parallelism on the side that *isn't* skewed.
   elides outright. No read, no migration — and Unified Memory appeared **21×
   faster** than explicit copies. Accumulating into a value that is observed later
   made the read real, and the true answer is 8× *slower*.
-- **A sticky error that took down four tests** (primitives). Calling
-  `cudaMemAdvise` without `concurrentManagedAccess` returns
-  `cudaErrorInvalidDevice`, which poisons the CUDA context so every later kernel
-  launch in the process fails too. Three unrelated test suites failed downstream
-  of it. Capability-gated APIs have to be checked before the call, not after.
+- **An error that was stale, diagnosed as sticky** (primitives, then
+  error-paths). Calling `cudaMemAdvise` without `concurrentManagedAccess` returns
+  `cudaErrorInvalidDevice`, and three unrelated test suites failed after it. This
+  README originally said the error *poisoned the context*. Measured later, it
+  does not: the next kernel launches and computes correctly. What actually
+  happened is that `CU_CHECK` threw without reading the runtime's last-error
+  record, so the next `CU_CHECK_KERNEL` - in whichever test came next - found the
+  old error and blamed its own, healthy kernel. The capability gate was the right
+  fix for the wrong reason; `CU_CHECK` now consumes what it throws for.
 - **A vote taken after the warp had already split** (warp primitives).
   `__all_sync` and `__activemask` called inside `if (lane == 0)` poll only the
   lanes still active *there* — which is lane 0 alone. They returned
@@ -185,6 +189,23 @@ put the parallelism on the side that *isn't* skewed.
   `cp.async` instruction that makes it genuinely asynchronous arrived with
   Ampere, so on Turing it silently lowers to an ordinary load-and-barrier and
   measures **0.98×**. Compiling is not evidence of acceleration.
+- **Every constructor leaked on failure** (error-paths). Eleven classes across
+  ten projects acquired device memory in the constructor body after
+  `impl_(new Impl)` and freed it only in the destructor - which C++ never runs
+  for an object whose constructor threw. A `StftProcessor` that failed partway
+  through construction stranded **3.4 GB**; a failed `VideoPipeline` took free
+  VRAM from 3296 MB to **0**. The same test run against the unfixed source fails
+  exactly that way, which is the only reason to believe the fix. Ownership now
+  lives in `Impl::~Impl`, so a partial construction releases what it acquired.
+- **Sizes that wrapped instead of failing** (error-paths). A `PagedKvCache`
+  configuration whose byte count is exactly 2^64 wrapped to zero, and
+  `cudaMalloc(&p, 0)` *succeeds* - so the cache constructed with a null slab.
+  `GpuHashTable(SIZE_MAX)` looped forever, because doubling toward it overflows
+  to zero. Both are now rejected before they reach the allocator.
+- **Tests that pass against the bug prove nothing.** A test measuring a 40-byte
+  VRAM leak through `cudaMemGetInfo` passed on the unfixed code - the leak was
+  below the resolution of the measurement. It was deleted, not kept as a green
+  checkmark.
 
 ## Method notes
 
@@ -202,6 +223,9 @@ put the parallelism on the side that *isn't* skewed.
    there.
 4. **Verify against something independent.** CPU reference models, closed-form
    Black-Scholes, brute-force k-NN, Dijkstra, brute-force frequency estimation.
+5. **Run a regression test against the unfixed code before trusting it.** Every
+   error-path test for a leak was confirmed to fail on the original source;
+   one that did not was removed.
 
 ## CUDA 13 / Windows gotchas
 
@@ -217,6 +241,23 @@ put the parallelism on the side that *isn't* skewed.
   struct where CUDA 12 took a device ordinal. Code written for either fails to
   compile on the other; `14-primitives` keeps both behind a `CUDART_VERSION`
   check so one source builds on CUDA 12 and 13 alike.
+- **`cudaMalloc` can exceed VRAM on Windows.** The driver's CUDA sysmem
+  fallback silently continues allocating in system RAM: on this 4 GB card
+  **7168 MB** was allocatable against 3294 MB free. Code that sizes work from
+  `cudaMemGetInfo` gets a PCIe-speed performance cliff instead of an error, and
+  an out-of-memory test gets no failure at all. Linux does not do this.
+- **A failed allocation costs time in proportion to its size** on this driver,
+  while the fallback tries to page for it: 1.1 s for 8 GB, 7.9 s for 256 GB,
+  and under a millisecond for anything at or above 1 TB.
+- **CUDA errors are recorded, and read once.** Any failed runtime call also sets
+  the thread's last error, and the next `cudaGetLastError()` returns it - even
+  from an unrelated kernel launch. A wrapper that throws on a failed call without
+  reading that record makes the next kernel check blame a healthy kernel.
+- Bad block dimensions (4096 threads) report `cudaErrorInvalidValue` on CUDA
+  13.4, not the `cudaErrorInvalidConfiguration` most documentation describes.
+- `compute-sanitizer` 2026.3 could not attach to any process unelevated on this
+  machine - not even a 20-line program. `scripts/sanitize.ps1` detects that and
+  stops; `scripts/sanitize.sh` is for Linux and Colab.
 - `nsys --trace osrt` is Linux-only and rejects the whole invocation on Windows.
 - Windows PowerShell turns *any* native-tool stderr into a terminating error
   under `$ErrorActionPreference = "Stop"` — a benign nsys warning aborts the

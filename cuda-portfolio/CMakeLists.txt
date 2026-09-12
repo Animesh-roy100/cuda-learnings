@@ -105,6 +105,7 @@ add_subdirectory(13-spmv)
 add_subdirectory(14-primitives)
 add_subdirectory(15-warp-primitives)
 add_subdirectory(16-layout-advanced)
+add_subdirectory(error-paths)
 
 message(STATUS "")
 message(STATUS "cuda_portfolio configured")

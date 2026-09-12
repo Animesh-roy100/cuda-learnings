@@ -36,9 +36,11 @@ struct ManagedMemoryCaps {
     // prefetch. Measured: with concurrentManagedAccess == 0, cudaMemAdvise
     // returns cudaErrorInvalidDevice exactly as cudaMemPrefetchAsync does.
     //
-    // That error is STICKY -- it poisons the CUDA context, so every subsequent
-    // kernel launch in the process fails too. Calling these APIs "to see what
-    // happens" is therefore not harmless; they must be gated up front.
+    // Gate them up front rather than calling "to see what happens". The error
+    // is NOT sticky -- measured, the context stays fully usable -- but a failed
+    // call leaves its error recorded, and the next CU_CHECK_KERNEL reads that
+    // record and reports a healthy kernel as failed. (This was originally
+    // misdiagnosed here as context poisoning; see error-paths/.)
     bool advise_supported() const { return concurrent_managed_access; }
     bool prefetch_supported() const { return concurrent_managed_access; }
 };

@@ -565,6 +565,44 @@ falls back to the ordinary load. This is the cleanest example in the repo of the
 thing worth internalising: *the API being available is not the same as the
 hardware being there, and only the clock can tell the two apart.*
 
+## Error paths (`error-paths`)
+
+Every other suite proves the code is right when things go well. This one proves
+it fails cleanly when they do not - and it found more real bugs than any
+project did.
+
+| finding | before | after |
+|---|---|---|
+| failed `StftProcessor` construction | **3.4 GB stranded** | released |
+| failed `VideoPipeline` construction | free VRAM 3296 MB -> **0 MB** | released |
+| `PagedKvCache`, byte count = 2^64 | wraps to 0, constructs with a null slab | `invalid_argument` |
+| `GpuHashTable(SIZE_MAX)` | **infinite loop** | `invalid_argument` |
+| `GpuHashTable(2^33)` | reaches `cudaMalloc`; mask would truncate | `invalid_argument` |
+| `CU_CHECK` on a failed call | next kernel check blames a healthy kernel | error consumed |
+
+The constructor leak was in **eleven classes across ten projects**: resources
+acquired in the constructor body, released only in the destructor, which C++
+never runs after a constructor throws. Ownership moved into `Impl::~Impl`. Each
+leak test was run against the original source first and fails there exactly as
+described - one that did not (a 40-byte leak below `cudaMemGetInfo`'s
+resolution) was deleted.
+
+**Recoverable, stale, and sticky are three different things**, and the suite
+tests each:
+
+- *Recoverable* - out-of-memory, bad launch dimensions, oversized copies. The
+  call fails; the context is fine.
+- *Stale* - a failed call's error stays recorded until something reads it, and
+  the next `cudaGetLastError()` returns it from wherever it is called. This is
+  what `14-primitives` originally misdiagnosed as context poisoning.
+- *Sticky* - an illegal device address. The context is gone; the death test
+  confirms the child cannot launch anything afterwards while the parent can.
+
+**The Windows allocator does not fail where Linux does.** With the driver's
+sysmem fallback, 7168 MB was allocatable on this 4 GB card against 3294 MB free,
+so the constructor tests size their failures from a measured allocation
+capacity rather than from `cudaMemGetInfo`.
+
 ## Cross-cutting lessons
 
 1. **Decide memory-bound vs compute-bound before optimising.** Projects 1–6 and
