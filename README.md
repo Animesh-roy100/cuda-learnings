@@ -21,6 +21,15 @@ called out rather than quietly dropped.
 > This is the GDDR6 card. Tuning against 128 GB/s would mean declaring victory
 > at 67% of the real ceiling.
 
+## No GTX 1650? Run it free on Colab
+
+Google Colab's free tier gives you a **Tesla T4 — also Turing `sm_75`**, the
+same architecture this targets. The code runs unmodified; only the machine
+around it changes (Linux, CUDA 12, 16 GB instead of 4).
+
+**[COLAB.md](COLAB.md)** has the full walkthrough, including a single cell that
+goes from nothing to a passing 169-test suite.
+
 ## Layout
 
 ```
@@ -34,7 +43,8 @@ cuda.code-workspace   opens all three in VS Code
 
 Five short programs, each teaching one thing: device query, the thread/block
 model, host↔device transfer and event timing, and shared-memory tiling. Build
-with `build.bat 02-hello\hello.cu`.
+with `build.bat 02-hello\hello.cu` (Windows) or `./build.sh 02-hello/hello.cu`
+(Linux and Colab).
 
 The tiled matmul is the centrepiece: **1.46× over naive**, not the 3–4× the
 textbooks quote, because Turing's 64 KB unified L1/shared cache already absorbs

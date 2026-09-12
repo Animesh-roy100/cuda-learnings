@@ -4,16 +4,24 @@
 function(cuda_portfolio_apply_flags target)
   target_link_libraries(${target} PUBLIC cu_common)
 
+  # Portable flags first. -lineinfo keeps source correlation in Nsight Compute
+  # without the code-motion penalty of a full -G debug build.
   target_compile_options(${target} PRIVATE
-    # Thrust/CCCL refuse to build against MSVC's traditional preprocessor.
-    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>
-    # -lineinfo keeps source correlation in Nsight Compute without the
-    # code-motion penalty of a full -G debug build.
     $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>
     $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Release>>:-O3>
-    $<$<COMPILE_LANGUAGE:CXX>:$<$<CXX_COMPILER_ID:MSVC>:/Zc:preprocessor>>
-    $<$<COMPILE_LANGUAGE:CXX>:$<$<CXX_COMPILER_ID:MSVC>:/permissive->>
   )
+
+  # MSVC-only. /Zc:preprocessor is required because Thrust/CCCL refuse to build
+  # against MSVC's traditional preprocessor -- but it is not a flag gcc or clang
+  # understands, so passing it unconditionally breaks every non-Windows build
+  # (Linux, WSL, and Google Colab included).
+  if(MSVC)
+    target_compile_options(${target} PRIVATE
+      $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>
+      $<$<COMPILE_LANGUAGE:CXX>:/Zc:preprocessor>
+      $<$<COMPILE_LANGUAGE:CXX>:/permissive->
+    )
+  endif()
 
   set_target_properties(${target} PROPERTIES
     CUDA_SEPARABLE_COMPILATION OFF
