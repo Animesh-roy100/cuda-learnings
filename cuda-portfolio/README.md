@@ -1,6 +1,6 @@
 # CUDA systems portfolio — GTX 1650 (Turing, `sm_75`)
 
-Seventeen production-structured CUDA projects. Every one builds, runs, and
+Eighteen production-structured CUDA projects. Every one builds, runs, and
 self-verifies against an independent reference. **Every number below was
 measured on this machine**, not estimated.
 
@@ -653,6 +653,65 @@ computing; here the overlap costs a second buffer, and the buffer costs occupanc
   the GPU. The hand-written paths launch in bands of 16 tile rows.
 - **The experimental 4-bit fragment (`u4`, 8x8x32) is exact** on a host-checked
   matrix - kept as a correctness check on a type deprecated after Turing.
+
+## 18. FlashAttention-style fused attention, from scratch (`18-flash-attention`)
+
+`O = softmax(QK^T / sqrt(d)) V`, three ways, all checked against an FP64
+log-sum-exp reference - bidirectional and causal, partial warps and tiles,
+logits in the hundreds (where a naive `exp` overflows FP32 many times over),
+and the exact identity that a causal first query returns `v_0`:
+
+- **naive** - what frameworks do eagerly: cuBLAS materializes the
+  `[heads][seq][seq]` score matrix, a kernel softmaxes each row, a second GEMM
+  applies it to V.
+- **fused** - one pass over the keys per query with an *online softmax*: a
+  running max, normalizer and weighted sum, updated key by key, every exponent
+  kept <= 0. No `seq x seq` matrix ever exists.
+- **fused, tiled** - the same pass with keys and values staged into shared
+  memory a tile at a time. Tile size sizes the `__shared__` arrays, so each size
+  is compiled and swept.
+
+**The fused kernels do not beat materialized attention on this card.** They
+lose by 3-4x at every length that fits in VRAM:
+
+| seq (8 heads) | naive | fused, tiled | device memory |
+|---|---|---|---|
+| 1024 | **8.0 ms** | 19.7 ms | 40 MB vs **8 MB** |
+| 4096 | **85.7 ms** | 313.5 ms | 544 MB vs **32 MB** |
+| 8192 | **358.6 ms** | 1106.0 ms | 2112 MB vs **64 MB** |
+
+They win on two axes. **Memory, 17-33x**, always. And **time, once the score
+matrix no longer fits**: at 16 heads x 8192 tokens naive needs 4224 MB on a
+4096 MB card. It does not fail - the Windows sysmem fallback moves the matrix
+into system RAM - and takes **7118 ms against 2205 ms** for the fused kernel.
+
+Why they lose below that point is measured, not assumed:
+
+| kernel | shared per block | blocks / SM |
+|---|---|---|
+| fused, from global | 16.6 KB | 3 |
+| fused, tile 8 | 20.7 KB | 3 |
+| fused, tile 16 | 24.8 KB | 2 |
+| fused, tile 32 | 41.0 KB | **1** |
+
+The per-query staging arrays - query and running output, `[32][65]` so that 32
+lanes never share a bank - cost the occupancy that project 17 found decisive:
+one to three warps per SM. And the online update is compute-bound at about three
+times the multiply-adds per (query, key) pair of the GEMM cuBLAS runs. At these
+sizes the N x N matrix fits comfortably and moves at 192 GB/s, so avoiding it
+buys little. The advantage FlashAttention is known for appears when the score
+matrix is the bottleneck - here, only past VRAM - while the memory advantage is
+unconditional.
+
+Two more measured details:
+
+- **Causal masking helps the fused kernels and barely helps naive.** At 4096
+  tokens, causal cuts fused-from-global from 370 to 155 ms (2.4x), while naive
+  goes from 84 to 63 ms: it still multiplies the whole matrix and only zeroes the
+  masked half in the softmax. The tiled kernel gains less (326 to 196 ms)
+  because it still stages every tile, masked keys included.
+- **The smallest tile won the sweep** (tile 8: 1.16x over reading keys from
+  global; tile 32: 0.48x), for the same reason: each larger tile costs a block.
 
 ## Error paths (`error-paths`)
 

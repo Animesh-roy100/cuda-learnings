@@ -35,14 +35,14 @@ same architecture this targets. The code runs unmodified; only the machine
 around it changes (Linux, CUDA 12, 16 GB instead of 4).
 
 **[COLAB.md](COLAB.md)** has the full walkthrough, including a single cell that
-goes from nothing to a passing 309-test suite.
+goes from nothing to a passing 350-test suite.
 
 ## Layout
 
 ```
 cuda-learning/     fundamentals — grid/block model, memory hierarchy, tiling
 cuda-projects/     five standalone programs, one file each
-cuda-portfolio/    seventeen production-structured systems: CMake, tests, profiling
+cuda-portfolio/    eighteen production-structured systems: CMake, tests, profiling
 cuda.code-workspace   opens all three in VS Code
 ```
 
@@ -66,7 +66,7 @@ indexing with DBSCAN, a zero-copy/CUDA-IPC pipeline, and Monte Carlo pricing.
 
 ### `cuda-portfolio/` — production structure
 
-Seventeen systems with modern CMake, GoogleTest suites, and profiling scripts.
+Eighteen systems with modern CMake, GoogleTest suites, and profiling scripts.
 Public headers contain **no CUDA syntax** (pimpl), so tests and host code
 compile as plain C++20 and only `.cu` files need nvcc.
 
@@ -78,7 +78,7 @@ cd build && ctest --output-on-failure
 ```
 
 ```
-100% tests passed out of 19 suites     (309 test cases)
+100% tests passed out of 20 suites     (350 test cases)
 ```
 
 | # | Project | Headline result |
@@ -100,6 +100,7 @@ cd build && ctest --output-on-failure
 | 15 | Warp & block primitives | Every shuffle, vote, barrier, atomic and intrinsic, each checked against a host reference |
 | 16 | Layout & advanced subsystems | SoA **1.80×**; tile padding **7.91×** for 128 bytes; WMMA **2.45×** on a card with "no Tensor Cores" |
 | 17 | Tensor-core GEMM vs cuBLAS | INT8 tensor cores **7.1x** `__dp4a`; 12.8% of cuBLAS INT8; FP16 loses to cuBLAS FP32 outright |
+| 18 | FlashAttention-style fused attention | **17-33x less memory**; 3-4x *slower* than materialized cuBLAS until the score matrix exceeds VRAM, then 3.2x faster |
 
 Each project's README documents its own measurements in detail.
 

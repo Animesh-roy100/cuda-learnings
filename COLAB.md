@@ -98,7 +98,7 @@ for f in ["01-quant-llm/quant_gemv.cu", "02-hash-table/hash_table.cu",
 Colab's sandbox may restrict process spawning — if it fails, that is the
 environment, not the code.
 
-## Step 5 — the full portfolio (17 projects, 309 tests)
+## Step 5 — the full portfolio (18 projects, 350 tests)
 
 ```python
 %cd /content/cuda-learnings/cuda-portfolio
@@ -115,7 +115,7 @@ A full build takes **5–10 minutes** on Colab's CPU allocation.
 %cd ..
 ```
 
-Expect `100% tests passed out of 19`. Every test is written against an
+Expect `100% tests passed out of 20`. Every test is written against an
 independent reference (CPU models, NIST vectors, closed-form Black-Scholes,
 brute-force k-NN, Dijkstra), so passing on different hardware is meaningful
 rather than tautological.
@@ -137,9 +137,10 @@ Then run whichever benchmarks interest you:
 !./build/bin/bench_warp_primitives   # every shuffle/vote/atomic/intrinsic
 !./build/bin/bench_layout_advanced   # AoS-vs-SoA, bank conflicts, WMMA, cg
 !./build/bin/bench_tc_gemm           # tensor-core GEMM vs cuBLAS, fp16 + int8
+!./build/bin/bench_flash_attention   # materialized vs fused online-softmax attention
 ```
 
-All seventeen, if you want the full sweep (about 7 minutes):
+All eighteen, if you want the full sweep (about 8 minutes):
 
 ```python
 import subprocess, glob, os
