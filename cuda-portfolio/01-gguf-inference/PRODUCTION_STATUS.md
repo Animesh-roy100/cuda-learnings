@@ -129,10 +129,11 @@ shell.
 | end to end | fixed prompt and seed, token counts, memory stability, KV exhaustion, context full, sequence isolation, fork/COW, truncation, cancellation, invalid steps, plan refusal |
 | sanitizers | ASan + UBSan on host code in CI; compute-sanitizer memcheck / racecheck / initcheck via `scripts/sanitize.*` (see below) |
 
-**compute-sanitizer on this machine:** on driver 616.92 it attaches only from
-an elevated shell. The results table lives in `sanitizer/SUMMARY.md` when that
-run has been done. On Linux and Colab, `scripts/sanitize.sh` needs no special
-permissions.
+**compute-sanitizer on this machine: not completed.** On driver 616.92 it
+could not attach to the test process even from an elevated shell, so no device
+memory, race or initialization results are claimed for this machine. On Linux
+and Colab, `scripts/sanitize.sh` needs no special permissions. All measured
+results are in [`../TEST_RESULTS.md`](../TEST_RESULTS.md).
 
 ## Reproducing the llama.cpp comparison
 
