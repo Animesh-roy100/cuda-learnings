@@ -172,6 +172,24 @@ it, the suite includes a host FP32 forward pass that takes about 10 seconds a
 check. On a T4 the decode rate should rise well above the GTX 1650's 130
 tokens/s: the Q4 GEMV is memory-bound, and the T4 has 320 GB/s against 192.
 
+### Checking the runtime against llama.cpp on the T4
+
+The same end-to-end gate as on the GTX 1650: llama.cpp's own log-probabilities
+for wikitext-2, replayed through this runtime. Different GPU, same thresholds.
+
+```python
+!wget -q https://huggingface.co/datasets/ggml-org/ci/resolve/main/wikitext-2-raw-v1.zip && unzip -oq wikitext-2-raw-v1.zip -d /content
+!git clone --depth 1 https://github.com/ggml-org/llama.cpp /content/llama.cpp
+!cmake -S /content/llama.cpp -B /content/llama.cpp/build -DGGML_CUDA=OFF && cmake --build /content/llama.cpp/build -j --target llama-perplexity
+!/content/llama.cpp/build/bin/llama-perplexity -m $CUDA_PORTFOLIO_MODEL -f /content/wikitext-2-raw/wiki.test.raw \
+    -c 512 -b 512 --chunks 8 --kl-divergence-base /content/reference.kld
+!./build/bin/compare_llamacpp --reference /content/reference.kld --text /content/wikitext-2-raw/wiki.test.raw
+```
+
+On the GTX 1650: mean KL divergence 0.0007, 98.2-98.5% same top token, and
+llama.cpp's tokenization reproduced exactly (see
+`01-gguf-inference/PRODUCTION_STATUS.md`).
+
 ## The PyTorch extension
 
 Colab ships torch with a matching CUDA toolkit, so the extension builds
@@ -205,7 +223,7 @@ out-of-bounds device access and shared-memory races:
 
 ```python
 !chmod +x scripts/sanitize.sh
-!./scripts/sanitize.sh                       # memcheck + racecheck, every suite
+!./scripts/sanitize.sh                       # memcheck + racecheck + initcheck, every suite
 !cat sanitizer/SUMMARY.md
 ```
 
