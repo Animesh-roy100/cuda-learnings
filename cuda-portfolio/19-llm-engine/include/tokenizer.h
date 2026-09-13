@@ -27,7 +27,21 @@ class GgufFile;
 
 class Tokenizer {
 public:
-    explicit Tokenizer(const GgufFile& f);
+    // How adjacent symbols are merged. Both use the same normalization, byte
+    // fallback and control-token handling; they differ only in merge order.
+    enum class Algorithm {
+        Auto,          // Merges when the file has tokenizer.ggml.merges, else Scores
+        Merges,        // lowest merge rank first, leftmost on ties -- the order of
+                       // the Hugging Face tokenizer the model was trained with
+        Scores,        // highest vocabulary score of the merged token first,
+                       // leftmost on ties -- llama.cpp's SentencePiece session for
+                       // tokenizer.ggml.model = "llama", which ignores merges.
+                       // With the all-zero scores of the TinyLlama file this is
+                       // "leftmost mergeable pair first". For parity tests.
+    };
+
+    explicit Tokenizer(const GgufFile& f, Algorithm algorithm = Algorithm::Auto);
+    Algorithm algorithm() const { return algorithm_; }
 
     int vocab_size() const { return static_cast<int>(pieces_.size()); }
     int bos() const { return bos_; }
@@ -42,6 +56,8 @@ private:
 
     std::vector<std::string> pieces_;
     std::vector<std::int64_t> types_;
+    std::vector<double> scores_;
+    Algorithm algorithm_ = Algorithm::Merges;
     std::unordered_map<std::string, int> ids_;
     std::unordered_map<std::string, int> merge_rank_;   // "left right" -> rank
     int byte_token_[256] = {};

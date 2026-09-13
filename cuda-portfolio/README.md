@@ -729,9 +729,9 @@ are designed to perform complex calculations quickly and efficiently. ...
 
 | configuration | perplexity | prefill tok/s | decode tok/s |
 |---|---|---|---|
-| float activations (W4A16) | 5.594 | 11.3 | 11.4 |
-| int8 activations (W4A8, `__dp4a`) | 5.551 | 128.9 | 121.3 |
-| int8 + CUDA graphs | 5.551 | **137.4** | **130.1** |
+| float activations (W4A16) | 5.594 | 11.3 | 11.2 |
+| int8 activations (W4A8, `__dp4a`) | 5.551 | 127.7 | 119.8 |
+| int8 + CUDA graphs | 5.551 | **133.9** | **125.0** |
 
 Perplexity is on the opening of *Alice's Adventures in Wonderland*. Model
 weights are not in the repository: `scripts/fetch_model.ps1` / `.sh` download
@@ -792,8 +792,8 @@ cached key per head - latency linear in position on a single warp. The fix
 launches one warp per head, strides each head's keys across its lanes, and
 replaces the key-by-key online softmax with reductions across the warp (max,
 normalizer, weighted sum). **5.0x at position 1008**, and prefill and decode
-throughput now agree, which is what confirms the diagnosis. Both kernels are
-kept and tested against the reference.
+throughput now agree, which is what confirms the diagnosis. The paged runtime
+keeps the per-head launch and reads keys through the device page table.
 
 ### What CUDA graphs were worth
 
@@ -802,16 +802,58 @@ each token launches ~270 kernels whose work, not their launch, dominates. The
 graphs work - every per-token launch reads its position from device memory, so
 they are byte-identical and capturable - they just have little to remove.
 
+### The production runtime
+
+The engine was then rebuilt to the production-readiness guide in
+`01-gguf-inference`; [`01-gguf-inference/PRODUCTION_STATUS.md`](01-gguf-inference/PRODUCTION_STATUS.md)
+maps every item of it to code and a test. In short:
+
+- **Ownership.** `GgufModel` (immutable, validated) -> `Runtime` (one device:
+  weights, KV page pool, workspace, CUDA graphs) -> `Sequence` (a page table
+  and a position; may outlive its runtime) -> sampler and generator.
+- **Loading is transactional.** Config relationships, every tensor's type and
+  shape, and the memory plan against free VRAM are checked before the first
+  allocation; `llm::Error` names the model, tensor, shape, sequence and position.
+- **Paged, batched device KV cache.** Attention reads device page tables; forks
+  share pages copy-on-write; `step()` over a batch is a transaction, so KV
+  exhaustion or a full context changes no sequence at all.
+- **Observability.** TTFT, prefill/decode tokens/s, per-stage latency, memory
+  plan, KV utilization, batch and context limits, quant format, driver release
+  and CUDA versions, as a JSON record (`chat --json`).
+
+| batch | ms / step | tokens/s total |
+|---|---|---|
+| 1 | 8.51 | 117.5 |
+| 2 | 13.46 | 148.6 |
+| 4 | 23.76 | 168.4 |
+
+### Checked against llama.cpp
+
+`compare_llamacpp` replays llama.cpp's own `--kl-divergence-base` output
+(CPU build b10932, 8 x 512-token chunks of wikitext-2) through this runtime:
+
+| mode | mean KL divergence | p99 | same top token | PPL ours | PPL llama.cpp |
+|---|---|---|---|---|---|
+| float | 0.00071 | 0.0049 | 98.48% | 23.376 | 23.319 |
+| int8 | 0.00072 | 0.0039 | 98.24% | 23.379 | 23.319 |
+
+It also found that the two **tokenize this file differently**: llama.cpp
+orders merges by vocabulary score, and this GGUF's 32,000 scores are all zero.
+The runtime's llama.cpp-compatible mode reproduces all 4,096 of llama.cpp's
+tokens; its default follows the merge list, and the model prefers it by a wide
+margin - **0.901 bits/byte against 1.313** on the same text.
+
 ### Honest limits
 
-- The KV cache is **contiguous** on the device. 01-gguf-inference's paged cache
-  gathers pages to the host, which a device decode loop cannot use; paging the
-  device cache is not done.
 - Prefill runs token by token through the decode path. A batched prefill with
   18-flash-attention's fused kernel and 17-tc-gemm's GEMM is the obvious next
   step and is not built.
 - The attention kernels are compiled for head_dim 64 and at most 32 heads, which
-  covers the Llama-family models of this size but not larger ones.
+  covers the Llama-family models of this size but not larger ones; other shapes
+  are refused at load as `Unsupported`.
+- Only the `llama` architecture with Q4_0 matrices and embeddings (Q6_K, Q4_0 or
+  F32 output projection) is loaded; anything else is refused with the list of
+  offending tensors.
 
 ## 20. PyTorch extension (`20-torch-extension`)
 

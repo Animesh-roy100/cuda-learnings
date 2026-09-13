@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run every GoogleTest suite under compute-sanitizer.
 #
-#   ./scripts/sanitize.sh                 # memcheck + racecheck, every suite
+#   ./scripts/sanitize.sh                 # memcheck + racecheck + initcheck, every suite
 #   ./scripts/sanitize.sh test_mc_pricing # one suite
 #   TOOLS="memcheck racecheck synccheck" ./scripts/sanitize.sh
 #   GTEST_FILTER='-*ProductionScale*' ./scripts/sanitize.sh
@@ -23,7 +23,9 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${BIN:-$ROOT/build/bin}"
 OUT="${OUT:-$ROOT/sanitizer}"
-TOOLS="${TOOLS:-memcheck racecheck}"
+# initcheck: device memory read before anything wrote it -- a KV page or a
+# workspace buffer consumed before its first fill.
+TOOLS="${TOOLS:-memcheck racecheck initcheck}"
 TIMEOUT="${TIMEOUT:-3600}"
 
 CS="$(command -v compute-sanitizer || true)"

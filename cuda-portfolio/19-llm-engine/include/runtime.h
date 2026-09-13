@@ -14,7 +14,12 @@
 //
 // Threading rules:
 //   * A GgufModel may be shared freely across threads.
-//   * A Runtime is driven by ONE thread at a time: step() is not re-entrant.
+//   * A Runtime is driven by ONE thread at a time: step() is not re-entrant,
+//     and a concurrent second call fails with Error(InvalidArgument) instead
+//     of sharing the workspace. Serve several callers by batching their
+//     sequences into one step(), not by calling step() from several threads.
+//   * A Runtime's CUDA work runs on its own stream; step() returns only after
+//     that stream is synchronized, so returned logits are final.
 //   * Sequences may be created, forked and destroyed from any thread; their
 //     page bookkeeping is synchronized. A sequence must not be destroyed while
 //     a step() that includes it is running.

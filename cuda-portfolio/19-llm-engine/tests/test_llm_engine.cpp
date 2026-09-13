@@ -8,7 +8,11 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstdio>
+#include <functional>
+#include <thread>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -340,6 +344,40 @@ TEST(Failure, AMemoryPlanLargerThanTheDeviceIsRefusedBeforeAllocating) {
     }
     EXPECT_LE(before - std::min(before, free_vram()), std::size_t(16) << 20)
         << "the refusal must come before any allocation";
+}
+
+// Two threads stepping one runtime: each call either completes or is refused
+// with InvalidArgument -- never interleaves -- and every sequence ends where its
+// successful steps put it, with the logits a solo run produces.
+TEST(Failure, ConcurrentStepsAreRefusedNotInterleaved) {
+    REQUIRE_MODEL();
+    llm::Runtime rt(model(), opts(2));
+    auto a = rt.new_sequence();
+    auto b = rt.new_sequence();
+    std::atomic<int> refused{0}, other{0};
+    std::vector<int> done(2, 0);
+    auto worker = [&](llm::Sequence* s, int index) {
+        for (int i = 0; i < 40 && s->position() < 30; ++i) {
+            try {
+                rt.step({s}, {1});
+                ++done[index];
+            } catch (const llm::Error& e) {
+                (e.kind() == llm::ErrorKind::InvalidArgument ? refused : other)++;
+            }
+        }
+    };
+    std::thread ta(worker, a.get(), 0), tb(worker, b.get(), 1);
+    ta.join();
+    tb.join();
+    std::printf("  completed %d + %d steps, refused %d concurrent calls\n", done[0], done[1], refused.load());
+    EXPECT_EQ(other.load(), 0);
+    EXPECT_EQ(a->position(), done[0]);
+    EXPECT_EQ(b->position(), done[1]);
+
+    auto control = rt.new_sequence();
+    std::vector<float> expected;
+    for (int i = 0; i <= a->position(); ++i) expected = rt.step({control.get()}, {1}).front();
+    EXPECT_EQ(rt.step({a.get()}, {1}).front(), expected) << "a's cache must hold exactly its own steps";
 }
 
 TEST(Failure, OptionsAreValidated) {

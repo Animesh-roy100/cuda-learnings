@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <climits>
 #include <cstdio>
+#include <functional>
+#include <queue>
 #include <stdexcept>
 #include <utility>
 
@@ -30,22 +32,34 @@ std::size_t utf8_len(unsigned char c) {
 
 }  // namespace
 
-Tokenizer::Tokenizer(const GgufFile& f) {
+Tokenizer::Tokenizer(const GgufFile& f, Algorithm algorithm) {
     const auto* tokens = f.meta_string_array("tokenizer.ggml.tokens");
     const auto* types = f.meta_int_array("tokenizer.ggml.token_type");
     const auto* merges = f.meta_string_array("tokenizer.ggml.merges");
+    const auto* scores = f.meta_float_array("tokenizer.ggml.scores");
     if (!tokens || tokens->empty()) throw std::runtime_error("tokenizer: no vocabulary in GGUF");
-    if (!merges) throw std::runtime_error("tokenizer: no merges in GGUF (score-based vocab not supported)");
+    if (algorithm == Algorithm::Auto) algorithm = merges ? Algorithm::Merges : Algorithm::Scores;
+    if (algorithm == Algorithm::Merges && !merges)
+        throw std::runtime_error("tokenizer: merge order requested but the GGUF has no tokenizer.ggml.merges");
+    if (algorithm == Algorithm::Scores && !scores)
+        throw std::runtime_error("tokenizer: score order requested but the GGUF has no tokenizer.ggml.scores");
+    algorithm_ = algorithm;
 
     pieces_ = *tokens;
     types_ = types ? *types : std::vector<std::int64_t>(pieces_.size(), 1);
     if (types_.size() != pieces_.size()) throw std::runtime_error("tokenizer: token_type length mismatch");
+    if (scores) {
+        scores_ = *scores;
+        if (scores_.size() != pieces_.size()) throw std::runtime_error("tokenizer: scores length mismatch");
+    }
 
     ids_.reserve(pieces_.size());
     for (int i = 0; i < static_cast<int>(pieces_.size()); ++i) ids_.emplace(pieces_[i], i);
 
-    merge_rank_.reserve(merges->size());
-    for (int r = 0; r < static_cast<int>(merges->size()); ++r) merge_rank_.emplace((*merges)[r], r);
+    if (merges) {
+        merge_rank_.reserve(merges->size());
+        for (int r = 0; r < static_cast<int>(merges->size()); ++r) merge_rank_.emplace((*merges)[r], r);
+    }
 
     for (int b = 0; b < 256; ++b) {
         char name[8];
@@ -64,34 +78,67 @@ std::vector<int> Tokenizer::encode_plain(const std::string& text) const {
     std::string norm = kSpace;
     for (char c : text) norm += (c == ' ') ? kSpace : std::string(1, c);
 
-    std::vector<std::string> sym;
+    // Symbols are spans of `norm` in a doubly linked list; a merged-away
+    // symbol has length 0.
+    struct Sym {
+        std::size_t start, len;
+        int prev, next;
+    };
+    std::vector<Sym> sym;
     for (std::size_t i = 0; i < norm.size();) {
         std::size_t n = std::min(utf8_len(static_cast<unsigned char>(norm[i])), norm.size() - i);
-        sym.emplace_back(norm.substr(i, n));
+        const int k = static_cast<int>(sym.size());
+        sym.push_back({i, n, k - 1, k + 1});
         i += n;
     }
+    sym.back().next = -1;
 
-    // Repeatedly apply the lowest-ranked merge present anywhere in the sequence.
-    // Quadratic in the number of symbols, which is fine for prompt-length text
-    // and makes the rank semantics impossible to get subtly wrong.
-    while (sym.size() > 1) {
-        int best = INT_MAX;
-        std::size_t at = 0;
-        for (std::size_t i = 0; i + 1 < sym.size(); ++i) {
-            auto it = merge_rank_.find(sym[i] + " " + sym[i + 1]);
-            if (it != merge_rank_.end() && it->second < best) {
-                best = it->second;
-                at = i;
-            }
+    // Always apply the best merge present anywhere in the sequence, the
+    // leftmost on a tie. Merges: best is the lowest merge rank. Scores: a pair
+    // is mergeable when its concatenation is a vocabulary entry, and best is
+    // that entry's highest score. A priority queue of candidate pairs keyed
+    // (key, left symbol) gives exactly that order in O(n log n); candidates
+    // made stale by an earlier merge are recognized by their recorded length
+    // and skipped. (A rescan per merge is simpler and quadratic: minutes for a
+    // few thousand tokens, and a stall on any long prompt.)
+    struct Cand {
+        double key;   // lower merges first
+        int left, right;
+        std::size_t len;
+        bool operator>(const Cand& o) const { return key != o.key ? key > o.key : left > o.left; }
+    };
+    std::priority_queue<Cand, std::vector<Cand>, std::greater<Cand>> queue;
+    auto consider = [&](int l, int r) {
+        if (l < 0 || r < 0) return;
+        const std::size_t len = sym[l].len + sym[r].len;
+        if (algorithm_ == Algorithm::Merges) {
+            auto it = merge_rank_.find(norm.substr(sym[l].start, sym[l].len) + " " +
+                                       norm.substr(sym[r].start, sym[r].len));
+            if (it != merge_rank_.end()) queue.push({double(it->second), l, r, len});
+        } else {
+            auto it = ids_.find(norm.substr(sym[l].start, len));
+            if (it != ids_.end()) queue.push({-scores_[it->second], l, r, len});
         }
-        if (best == INT_MAX) break;
-        sym[at] += sym[at + 1];
-        sym.erase(sym.begin() + static_cast<std::ptrdiff_t>(at) + 1);
+    };
+    for (int i = 0; i + 1 < static_cast<int>(sym.size()); ++i) consider(i, i + 1);
+
+    while (!queue.empty()) {
+        const Cand c = queue.top();
+        queue.pop();
+        Sym& l = sym[c.left];
+        Sym& r = sym[c.right];
+        if (l.len == 0 || r.len == 0 || l.next != c.right || l.len + r.len != c.len) continue;
+        l.len += r.len;
+        r.len = 0;
+        l.next = r.next;
+        if (r.next >= 0) sym[r.next].prev = c.left;
+        consider(l.prev, c.left);
+        consider(c.left, l.next);
     }
 
     std::vector<int> out;
-    out.reserve(sym.size());
-    for (const auto& s : sym) {
+    for (int i = 0; i >= 0; i = sym[i].next) {
+        const std::string s = norm.substr(sym[i].start, sym[i].len);
         auto it = ids_.find(s);
         if (it != ids_.end()) {
             out.push_back(it->second);

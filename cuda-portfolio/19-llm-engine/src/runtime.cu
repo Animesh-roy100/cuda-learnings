@@ -382,6 +382,7 @@ MemoryPlan Runtime::plan_memory(const GgufModel& model, const RuntimeOptions& o)
 }
 
 struct Runtime::Impl {
+    std::atomic<bool> stepping{false};   // step() is single-threaded; detect violations
     DeviceInfo dev;
     Activations act = Activations::Float;
     MemoryPlan plan;
@@ -658,6 +659,15 @@ std::vector<std::vector<float>> Runtime::step(const std::vector<Sequence*>& seqs
     sc.operation = "step";
     sc.model = model_->path();
     sc.device = o.device;
+
+    // One thread drives a runtime: steps share one workspace and one stream.
+    // A second concurrent caller is refused, not allowed to corrupt the first.
+    if (I.stepping.exchange(true))
+        throw Error(ErrorKind::InvalidArgument, "step() called concurrently on one Runtime", sc);
+    struct Release {
+        std::atomic<bool>& flag;
+        ~Release() { flag = false; }
+    } release{I.stepping};
 
     // ---- validation: nothing below may change state until all of it passes
     if (B == 0) throw Error(ErrorKind::InvalidArgument, "empty batch", sc);

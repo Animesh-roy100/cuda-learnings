@@ -45,7 +45,8 @@ add_library(host_code STATIC
   ${ROOT}/19-llm-engine/src/quant.cpp
   ${ROOT}/19-llm-engine/src/page_allocator.cpp
   ${ROOT}/19-llm-engine/src/sampler.cpp
-  ${ROOT}/19-llm-engine/src/reference.cpp)
+  ${ROOT}/19-llm-engine/src/reference.cpp
+  ${ROOT}/19-llm-engine/src/llamacpp_reference.cpp)
 target_include_directories(host_code PUBLIC
   ${ROOT}/01-gguf-inference/include
   ${ROOT}/19-llm-engine/include)

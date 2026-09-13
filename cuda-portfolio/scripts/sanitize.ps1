@@ -1,8 +1,9 @@
 # Run every GoogleTest suite under compute-sanitizer (Windows).
 #
-#   .\scripts\sanitize.ps1                         # memcheck + racecheck
+#   .\scripts\sanitize.ps1                         # memcheck + racecheck + initcheck
 #   .\scripts\sanitize.ps1 -Target test_mc_pricing
 #   .\scripts\sanitize.ps1 -Tools memcheck -TimeoutSec 600
+#   .\scripts\sanitize.ps1 -Target test_llm_engine -GtestFilter "-Reference.*"
 #
 # On the GTX 1650 laptop this repo was written on, compute-sanitizer 2026.3
 # failed to attach to ANY process when run unelevated -- including a 20-line
@@ -16,9 +17,10 @@
 
 param(
     [string]$Target = "",
-    [string[]]$Tools = @("memcheck", "racecheck"),
+    [string[]]$Tools = @("memcheck", "racecheck", "initcheck"),
     [int]$TimeoutSec = 3600,
-    [string]$BuildDir = "build"
+    [string]$BuildDir = "build",
+    [string]$GtestFilter = ""
 )
 
 $ErrorActionPreference = "Continue"
@@ -43,6 +45,7 @@ foreach ($t in $targets) {
         $log = Join-Path $out "$t.$tool.log"
         $exe = Join-Path $bin "$t.exe"
         $extra = if ($tool -eq "memcheck") { "--leak-check full" } else { "" }
+        $gtest = if ($GtestFilter) { "`"--gtest_filter=$GtestFilter`"" } else { "" }
         Write-Host ("{0,-28} {1,-10} ... " -f $t, $tool) -NoNewline
 
         $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -51,7 +54,7 @@ foreach ($t in $targets) {
         $bat = Join-Path $out "_run.bat"
         @(
             "@echo off",
-            "`"$($cs.FullName)`" --tool $tool $extra --launch-timeout 60 --error-exitcode 99 `"$exe`" > `"$log`" 2>&1",
+            "`"$($cs.FullName)`" --tool $tool $extra --launch-timeout 60 --error-exitcode 99 `"$exe`" $gtest > `"$log`" 2>&1",
             "exit /b %ERRORLEVEL%"
         ) | Set-Content $bat -Encoding ascii
         $p = Start-Process cmd.exe -ArgumentList "/c `"$bat`"" -PassThru -WindowStyle Hidden

@@ -9,8 +9,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <functional>
@@ -24,6 +27,7 @@
 
 #include "errors.h"
 #include "gguf.h"
+#include "llamacpp_reference.h"
 #include "model_config.h"
 #include "page_allocator.h"
 #include "quant.h"
@@ -440,13 +444,15 @@ std::string model_path() {
     if (!home) home = std::getenv("HOME");
     return std::string(home ? home : ".") + "/models/tinyllama-1.1b-chat-v1.0.Q4_0.gguf";
 }
-std::unique_ptr<llm::Tokenizer>& tok() {
+std::unique_ptr<llm::GgufFile>& tok_file() {
     static std::unique_ptr<llm::GgufFile> f;
-    static std::unique_ptr<llm::Tokenizer> t;
-    if (!t && std::filesystem::exists(model_path())) {
+    if (!f && std::filesystem::exists(model_path()))
         f = std::make_unique<llm::GgufFile>(llm::GgufFile::open(model_path()));
-        t = std::make_unique<llm::Tokenizer>(*f);
-    }
+    return f;
+}
+std::unique_ptr<llm::Tokenizer>& tok() {
+    static std::unique_ptr<llm::Tokenizer> t;
+    if (!t && tok_file()) t = std::make_unique<llm::Tokenizer>(*tok_file());
     return t;
 }
 #define REQUIRE_TOKENIZER() \
@@ -477,4 +483,199 @@ TEST(Tokenizer, RecognizesControlTokensWrittenAsText) {
     REQUIRE_TOKENIZER();
     const auto ids = tok()->encode("<|user|>\nhi</s>\n<|assistant|>\n", true);
     EXPECT_EQ(std::count(ids.begin(), ids.end(), tok()->eos()), 1);
+}
+
+// The encoder applies merges through a priority queue. This is the definition
+// it must reproduce -- rescan, apply the lowest rank, leftmost on a tie --
+// written as plainly as possible and compared on varied text.
+TEST(Tokenizer, PriorityQueueMergesMatchTheDefinition) {
+    REQUIRE_TOKENIZER();
+    const auto& merges = *tok_file()->meta_string_array("tokenizer.ggml.merges");
+    const auto& vocab = *tok_file()->meta_string_array("tokenizer.ggml.tokens");
+    std::map<std::string, int> rank, id;
+    for (int r = 0; r < int(merges.size()); ++r) rank.emplace(merges[r], r);
+    for (int i = 0; i < int(vocab.size()); ++i) id.emplace(vocab[i], i);
+    const std::string space = "\xE2\x96\x81";
+
+    auto reference = [&](const std::string& text) {
+        std::string norm = space;
+        for (char c : text) norm += c == ' ' ? space : std::string(1, c);
+        std::vector<std::string> sym;
+        for (std::size_t i = 0; i < norm.size();) {
+            const unsigned char c = norm[i];
+            std::size_t n = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 1;
+            n = std::min(n, norm.size() - i);
+            sym.push_back(norm.substr(i, n));
+            i += n;
+        }
+        while (sym.size() > 1) {
+            int best = std::numeric_limits<int>::max();
+            std::size_t at = 0;
+            for (std::size_t i = 0; i + 1 < sym.size(); ++i) {
+                auto it = rank.find(sym[i] + " " + sym[i + 1]);
+                if (it != rank.end() && it->second < best) best = it->second, at = i;
+            }
+            if (best == std::numeric_limits<int>::max()) break;
+            sym[at] += sym[at + 1];
+            sym.erase(sym.begin() + std::ptrdiff_t(at) + 1);
+        }
+        std::vector<int> out;
+        for (const auto& s : sym) {
+            if (auto it = id.find(s); it != id.end()) {
+                out.push_back(it->second);
+            } else {
+                for (unsigned char b : s) {
+                    char name[8];
+                    std::snprintf(name, sizeof name, "<0x%02X>", b);
+                    out.push_back(id.at(name));
+                }
+            }
+        }
+        return out;
+    };
+
+    for (const std::string s :
+         {"The capital of France is Paris.", " = Robert Boulter = \n", "aaaaaaaaaaaaaaaa", "abababababab",
+          "unbelievably, the 1990s @-@ era re-release sold 3 @,@ 000 copies", "  leading and  double  spaces ",
+          "na\xC3\xAFve caf\xC3\xA9 \xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E \xF0\x9F\x9A\x80",
+          "def f(x):\n\treturn x**2  # square", "Mississippi mississippi MISSISSIPPI"})
+        EXPECT_EQ(tok()->encode(s, false), reference(s)) << s;
+}
+
+// llama.cpp tokenizes this file by vocabulary score -- all zero here, so the
+// leftmost mergeable pair wins -- and wikitext-2's first heading shows the
+// difference: llama.cpp (b10932) emits " Bou" (12476) where merge order emits
+// " B" (350). compare_llamacpp checks score order against 4096 llama.cpp tokens.
+TEST(Tokenizer, ScoreOrderIsLeftmostFirstWithZeroScores) {
+    REQUIRE_TOKENIZER();
+    const llm::Tokenizer by_score(*tok_file(), llm::Tokenizer::Algorithm::Scores);
+    EXPECT_EQ(by_score.algorithm(), llm::Tokenizer::Algorithm::Scores);
+    EXPECT_EQ(tok()->algorithm(), llm::Tokenizer::Algorithm::Merges);
+    const auto s = by_score.encode(" = Robert Boulter = ", false);
+    const auto m = tok()->encode(" = Robert Boulter = ", false);
+    EXPECT_NE(std::find(s.begin(), s.end(), 12476), s.end());
+    EXPECT_NE(std::find(m.begin(), m.end(), 350), m.end());
+    EXPECT_EQ(by_score.decode(s), tok()->decode(m)) << "different tokens, same text";
+    EXPECT_EQ(by_score.encode("The capital of France is", true), tok()->encode("The capital of France is", true));
+}
+
+TEST(Tokenizer, LongInputsStayFast) {
+    REQUIRE_TOKENIZER();
+    std::string text;
+    while (text.size() < 200000)
+        text += "It was the best of times, it was the worst of times, it was the age of wisdom, "
+                "it was the age of foolishness @-@ 1859.\n";
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto ids = tok()->encode(text, true);
+    const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    EXPECT_GT(ids.size(), 40000u);
+    EXPECT_LT(s, 5.0) << "200 KB took " << s << " s: encoding has gone superlinear";
+    EXPECT_EQ(tok()->decode(std::vector<int>(ids.begin() + 1, ids.end())), text);
+}
+
+// ===================================================== llama.cpp reference file
+namespace {
+
+// n_ctx 6, n_vocab 5 (odd, so each record pads to nv = 10), 2 chunks, and
+// records_per_chunk = 6 - 1 - 3 = 2.
+std::vector<std::uint8_t> reference_file(int tokens_override = -1) {
+    std::vector<std::uint8_t> b = {'_', 'l', 'o', 'g', 'i', 't', 's', '_'};
+    auto put = [&](const void* p, std::size_t n) {
+        const auto* c = static_cast<const std::uint8_t*>(p);
+        b.insert(b.end(), c, c + n);
+    };
+    const std::int32_t header[] = {6, 5, 2};
+    put(header, sizeof header);
+    for (int i = 0; i < 12; ++i) {
+        const std::int32_t t = i == 7 && tokens_override >= 0 ? tokens_override : i % 5;
+        put(&t, 4);
+    }
+    for (int r = 0; r < 4; ++r) {
+        const float scale = 0.001f * float(r + 1), min_lp = -16.0f - float(r);
+        put(&scale, 4);
+        put(&min_lp, 4);
+        for (int i = 0; i < 6; ++i) {   // 5 entries and 1 of padding
+            const std::uint16_t q = std::uint16_t(i < 5 ? 1000 * (i + 1) * (r + 1) : 0xBEEF);
+            put(&q, 2);
+        }
+    }
+    return b;
+}
+
+}  // namespace
+
+TEST(LlamaCppReference, ParsesTheFileFormat) {
+    const auto ref = llm::LlamaCppReference::parse(reference_file());
+    EXPECT_EQ(ref.n_ctx(), 6);
+    EXPECT_EQ(ref.n_vocab(), 5);
+    EXPECT_EQ(ref.n_chunk(), 2);
+    EXPECT_EQ(ref.first(), 3);
+    EXPECT_EQ(ref.records_per_chunk(), 2);
+    EXPECT_EQ(ref.chunk_input(1, 1), (std::vector<int>{1, 2, 3, 4, 0, 1})) << "BOS replaces the first token";
+    EXPECT_EQ(ref.tokens()[6], 1) << "the stored tokens are not modified";
+
+    std::vector<float> lp;
+    ref.log_probs(1, 1, lp);   // record 3
+    ASSERT_EQ(lp.size(), 5u);
+    for (int i = 0; i < 5; ++i) EXPECT_FLOAT_EQ(lp[i], 0.004f * float(1000 * (i + 1) * 4) - 19.0f);
+}
+
+TEST(LlamaCppReference, RejectsMalformedFiles) {
+    auto kind = [](std::vector<std::uint8_t> b) {
+        try {
+            llm::LlamaCppReference::parse(std::move(b));
+        } catch (const llm::Error& e) {
+            return e.kind();
+        }
+        return llm::ErrorKind::Device;
+    };
+    auto bad_magic = reference_file();
+    bad_magic[0] = 'X';
+    EXPECT_EQ(kind(bad_magic), llm::ErrorKind::InvalidArgument);
+    auto truncated = reference_file();
+    truncated.pop_back();
+    EXPECT_EQ(kind(truncated), llm::ErrorKind::InvalidArgument);
+    auto extended = reference_file();
+    extended.push_back(0);
+    EXPECT_EQ(kind(extended), llm::ErrorKind::InvalidArgument);
+    EXPECT_EQ(kind(reference_file(5)), llm::ErrorKind::InvalidArgument) << "token outside the vocabulary";
+    auto huge = reference_file();
+    const std::int32_t n_chunk = 1 << 30;
+    std::memcpy(huge.data() + 16, &n_chunk, 4);
+    EXPECT_EQ(kind(huge), llm::ErrorKind::InvalidArgument);
+    std::vector<float> out;
+    EXPECT_THROW(llm::LlamaCppReference::parse(reference_file()).log_probs(2, 0, out), llm::Error);
+}
+
+TEST(KlDivergence, IdenticalDistributionsAgreeExactly) {
+    const std::vector<float> logits = {2.0f, -1.0f, 0.5f, 3.0f};
+    double z = 0;
+    for (float l : logits) z += std::exp(double(l));
+    std::vector<float> base;
+    for (float l : logits) base.push_back(float(l - std::log(z)));
+    llm::KlDivergence kl;
+    kl.add(logits.data(), base, 2);
+    EXPECT_NEAR(kl.mean_kld(), 0.0, 1e-6);
+    EXPECT_EQ(kl.same_top_fraction(), 1.0);
+    EXPECT_NEAR(kl.ppl_ours(), kl.ppl_base(), 1e-5);
+    EXPECT_NEAR(kl.ppl_ours(), z / std::exp(0.5), 1e-4);
+}
+
+TEST(KlDivergence, MatchesTheDefinitionOnDifferentDistributions) {
+    const std::vector<float> ours = {0.0f, 0.0f};                             // p = (0.5, 0.5)
+    const std::vector<float> base = {float(std::log(0.9)), float(std::log(0.1))};
+    llm::KlDivergence kl;
+    kl.add(ours.data(), base, 0);
+    const double expected = 0.9 * std::log(0.9 / 0.5) + 0.1 * std::log(0.1 / 0.5);
+    EXPECT_NEAR(kl.mean_kld(), expected, 1e-6);
+    EXPECT_EQ(kl.same_top_fraction(), 1.0) << "a tie in ours resolves to the lowest id, as llama.cpp does";
+    EXPECT_NEAR(kl.rms_p_diff(), 0.4, 1e-6);
+    EXPECT_NEAR(kl.ppl_base(), 1.0 / 0.9, 1e-5);
+
+    // Entries 16 nats or more below are ignored, as in llama.cpp.
+    llm::KlDivergence floor;
+    const std::vector<float> floor_base = {0.0f, -17.0f};
+    const std::vector<float> floor_ours = {0.0f, -100.0f};
+    floor.add(floor_ours.data(), floor_base, 0);
+    EXPECT_NEAR(floor.mean_kld(), 0.0, 1e-6);
 }
